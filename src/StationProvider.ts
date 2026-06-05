@@ -1,0 +1,1383 @@
+/**
+ * StationProvider — Ream provider that wires Station's `ResourceRegistry`
+ * into the host container and mounts the list + show routes for every
+ * registered resource.
+ *
+ * Story 54.7 EXTENDS this provider with Warden integration (login
+ * surface + `/_assets/station/*` mount). The class shape and lifecycle
+ * stay; only `start()` grows.
+ *
+ * Mirror of `packages/aurora/src/AuroraProvider.ts` — register binds a
+ * singleton + sets the `services/main` proxy backing instance, start
+ * dynamically imports BOTH `@c9up/ream/services/router` AND `@c9up/atlas`
+ * inside try/catch so non-Ream hosts AND Station-without-Atlas consumers
+ * are silently tolerated. Once both modules resolve, the per-resource
+ * repository + column metadata is built ONCE (cached on the instance)
+ * and re-used by every request, then route registration runs OUTSIDE
+ * the catch — real bugs in route registration surface instead of being
+ * swallowed.
+ */
+
+import type {
+	BaseRepository as AtlasBaseRepository,
+	ColumnMetadata,
+	DatabaseConnection,
+} from "@c9up/atlas";
+import { ResourceRegistry } from "./ResourceRegistry.js";
+import { _setStation } from "./services/main.js";
+import type { AuditEvent, Resource, ResourceAction } from "./types.js";
+// note: AuditEvent + ResourceAction are used by the CRUD handlers below;
+// the imports stay in one block for clarity.
+import { renderNotFoundPage } from "./views/errors/404.js";
+import { renderFormPage } from "./views/form.js";
+import { renderListPage } from "./views/list.js";
+import { renderLoginPage } from "./views/login.js";
+import { renderShowPage } from "./views/show.js";
+
+/**
+ * Duck-typed slice of the host's IoC container — Station MUST stay
+ * publishable without importing `@c9up/ream` directly (memory
+ * `project_package_extraction`). The Ream container fulfils this shape.
+ */
+interface StationContainer {
+	singleton<T>(key: unknown, factory: () => T): void;
+	resolve<T>(key: unknown): T;
+}
+
+interface StationConfigStore {
+	get<T>(key: string): T | undefined;
+}
+
+export interface StationAppContext {
+	container: StationContainer;
+	config: StationConfigStore;
+}
+
+/**
+ * Minimal HTTP context used by the route handlers. Structurally
+ * compatible with `@c9up/ream`'s HttpContext (request / response /
+ * params) without forcing the import. `redirect` + `header` are BOTH
+ * required — Ream's HttpContext exposes both, and the 302 fallback path
+ * requires one of them to ship a real Location (refusing to silently
+ * emit a Location-less redirect).
+ */
+interface StationHttpContext {
+	request: {
+		qs(): Record<string, string | undefined>;
+		body?(): Promise<unknown> | unknown;
+		url?(): string;
+		header?(name: string): string | undefined;
+		cookie?(name: string): string | undefined;
+	};
+	response: {
+		status(code: number): unknown;
+		type(value: string): unknown;
+		send(body: string): unknown;
+		json(data: unknown): unknown;
+		redirect(url: string): unknown;
+		header(name: string, value: string): unknown;
+		cookie?(
+			name: string,
+			value: string,
+			options?: {
+				httpOnly?: boolean;
+				secure?: boolean;
+				sameSite?: "Strict" | "Lax" | "None";
+				maxAge?: number;
+				path?: string;
+			},
+		): unknown;
+		clearCookie?(name: string, options?: { path?: string }): unknown;
+	};
+	params: Record<string, string>;
+	auth?: {
+		user?: { id: unknown; [key: string]: unknown };
+		roles?: string[];
+	};
+	/**
+	 * Optional per-request keyed store. Station reads `csrfToken` here
+	 * so the auto-generated form embeds a hidden CSRF input — matches
+	 * the `csrfToken` convention the @c9up/blackhole middleware writes to.
+	 * Hosts wiring a different CSRF strategy can write the token here
+	 * under the same key and the form will pick it up.
+	 */
+	store?: {
+		get(key: string): unknown;
+		set?(key: string, value: unknown): void;
+	};
+}
+
+interface StationRouter {
+	get(
+		path: string,
+		handler: (ctx: StationHttpContext) => Promise<void> | void,
+	): unknown;
+	post(
+		path: string,
+		handler: (ctx: StationHttpContext) => Promise<void> | void,
+	): unknown;
+	put(
+		path: string,
+		handler: (ctx: StationHttpContext) => Promise<void> | void,
+	): unknown;
+	delete(
+		path: string,
+		handler: (ctx: StationHttpContext) => Promise<void> | void,
+	): unknown;
+}
+
+/**
+ * Atlas `BaseEntity` instances expose a `setProp(key, value)` helper
+ * so Station can mutate columns without poking at internal dirty-
+ * tracking state. The repository surface treats rows as indexed maps
+ * (for view rendering + audit diff) AND as mutators (for update).
+ */
+interface StationEntity {
+	[key: string]: unknown;
+	setProp(key: string, value: unknown): void;
+}
+
+/** Minimum repository surface the CRUD handlers need from atlas. */
+interface StationRepository {
+	find(id: string | number | bigint): Promise<StationEntity | null>;
+	query(): StationQuery;
+	create(data: Record<string, unknown>): Promise<StationEntity>;
+	save(entity: StationEntity): Promise<void>;
+	delete(entity: StationEntity): Promise<void>;
+}
+
+interface StationQuery {
+	orderBy(column: string, direction: "asc" | "desc"): StationQuery;
+	forPage(page: number, perPage: number): StationQuery;
+	exec(): Promise<Record<string, unknown>[]>;
+	count(column?: string): Promise<number>;
+}
+
+/** Per-resource snapshot built once at `start()`, reused on every request. */
+interface ResourceContext {
+	repo: StationRepository;
+	columns: ReadonlyArray<ColumnMetadata>;
+	pkColumn: string;
+}
+
+/** Lazy-imported `@c9up/atlas` value surface. */
+interface AtlasModule {
+	BaseRepository: typeof AtlasBaseRepository;
+	getColumnMetadata: (entity: unknown) => ReadonlyArray<ColumnMetadata>;
+	getPrimaryKey: (entity: unknown) => string | undefined;
+}
+
+/**
+ * Authorization scope (Epic 56). Declared LOCALLY — Station stays
+ * agnostic of `@c9up/warden` and never imports its `Scope` type. The
+ * shape mirrors warden's `Scope` (`"global" | { tenant }`) structurally
+ * so a value crosses the duck-typed boundary without a cast. Station
+ * gates at the implicit `"global"` scope in 56.5 (D6); the param exists
+ * so a later story can thread a per-request tenant without touching call
+ * sites.
+ */
+type StationScope = "global" | { readonly tenant: string };
+
+/**
+ * Authenticated user shape Station hands to the auth layer. Matches what
+ * `ctx.auth.user` carries (and what Warden's `verify`/`authenticate`
+ * return on `user`) — an `id` plus arbitrary claims. Kept structural so
+ * Station never imports warden's `UserPayload`.
+ */
+interface StationAuthUser {
+	id: unknown;
+	[key: string]: unknown;
+}
+
+/**
+ * Minimal `AuthManager` surface Station needs from `@c9up/warden`. The
+ * full class exposes more (strategy registration, sign-token, password
+ * hashing, etc.); Station needs the credentials-in / verify-token path
+ * (54.7) plus the coarse authorization helpers (56.5): `hasPermission`
+ * (per-action gate) and `hasRole` (the `requireRole` blanket gate), both
+ * resolved through Warden's single `RightsResolver` (Epic 56). Consumed
+ * duck-typed via the container `"auth"` alias — the SAME uniform pattern
+ * Station uses for the rest of the Ream universe it integrates
+ * (`@c9up/ream`, `@c9up/atlas`): resolve through the container, never a
+ * static `import "@c9up/warden"`, so the optional-peer / degraded-host
+ * path keeps working (D1).
+ */
+interface WardenAuthManager {
+	authenticate(
+		credentials: Record<string, unknown>,
+		strategyName?: string,
+	): Promise<{
+		authenticated: boolean;
+		// Warden's AuthResult has NO top-level `token` — JwtStrategy puts
+		// the issued token on `user.token` (see warden AuthManager.ts +
+		// JwtStrategy.authenticate). The session cookie is read from there.
+		user?: { id: unknown; token?: string; [key: string]: unknown };
+		error?: string;
+	}>;
+	verify(
+		token: string,
+		strategyName?: string,
+	): Promise<{
+		authenticated: boolean;
+		user?: { id: unknown; [key: string]: unknown };
+		error?: string;
+		strategyCrash?: boolean;
+	}>;
+	/**
+	 * Resolve whether `user` holds `permission` within `scope` (Epic 56,
+	 * default `"global"`). Backed by the single `RightsResolver` —
+	 * role→permission + ACL grants ONLY, never the token's `permissions`
+	 * claim (warden D1). A missing `await` here yields a truthy Promise =
+	 * silent ALLOW, so every call site MUST await.
+	 */
+	hasPermission(
+		user: StationAuthUser,
+		permission: string,
+		scope?: StationScope,
+	): Promise<boolean>;
+	/**
+	 * Resolve whether `user` holds `role` within `scope` (Epic 56,
+	 * default `"global"`). Backed by the same resolver as `hasPermission`.
+	 */
+	hasRole(
+		user: StationAuthUser,
+		role: string,
+		scope?: StationScope,
+	): Promise<boolean>;
+}
+
+/**
+ * Config block read from `app.config.get<StationConfig>('station')`.
+ * Every field is optional — the defaults match the 54.2 / 54.3 / 54.4
+ * conventions so an app can leave the config out entirely.
+ */
+export interface StationConfig {
+	/**
+	 * When true (default `true` if `@c9up/warden` is installed),
+	 * Station mounts a login surface at `/admin/login` and gates every
+	 * other `/admin/*` route behind `auth.verify(token)`. Setting this
+	 * to `false` keeps the old open-by-default behaviour from 54.2.
+	 */
+	requireAuth?: boolean;
+	/**
+	 * Role required to pass the auth gate. When omitted, any
+	 * authenticated user can access `/admin/*` (the policy gates in
+	 * 54.4 still apply per-action).
+	 */
+	requireRole?: string;
+	/**
+	 * Where to redirect on a failed auth check. Defaults to
+	 * `/admin/login`.
+	 */
+	loginPath?: string;
+	/**
+	 * Cookie name carrying the auth token. Defaults to `station_auth`
+	 * to avoid colliding with app-level session cookies.
+	 */
+	cookieName?: string;
+}
+
+const MAX_PER_PAGE = 100;
+const DEFAULT_PER_PAGE = 25;
+const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
+/** Process-scoped flags so we warn once per process, not once per request. */
+let _authWarnEmitted = false;
+let _perPageClampWarned = false;
+let _seedPermsWarned = false;
+let _missingAuditWarned = false;
+let _csrfWarnEmitted = false;
+
+/** @internal Reset module-level flags between tests. */
+export function _resetStationProviderFlags(): void {
+	_authWarnEmitted = false;
+	_perPageClampWarned = false;
+	_seedPermsWarned = false;
+	_missingAuditWarned = false;
+	_csrfWarnEmitted = false;
+}
+
+const TIMESTAMP_PROPERTY_KEYS: ReadonlySet<string> = new Set([
+	"createdAt",
+	"updatedAt",
+	"deletedAt",
+]);
+const TIMESTAMP_COLUMN_NAMES: ReadonlySet<string> = new Set([
+	"created_at",
+	"updated_at",
+	"deleted_at",
+]);
+
+/**
+ * Mass-assignment guard. Only accepts keys that are:
+ *   1. A declared `@Column` propertyKey on the resource entity, AND
+ *   2. Not the primary key (DB-managed), AND
+ *   3. Not a framework timestamp (created_at / updated_at / deleted_at —
+ *      hook-managed).
+ *
+ * The `_method` synthetic field from browser-form method-overrides is
+ * dropped automatically because it never matches a column propertyKey.
+ *
+ * Returning a fresh object — never the caller's reference — so a
+ * downstream mutation can't poison the audit snapshot.
+ */
+function filterWritableBody(
+	body: Record<string, unknown>,
+	columns: ReadonlyArray<ColumnMetadata>,
+	pkColumn: string,
+): Record<string, unknown> {
+	const writable: Record<string, unknown> = {};
+	const validKeys = new Set<string>();
+	for (const c of columns) {
+		if (c.propertyKey === pkColumn) continue;
+		if (TIMESTAMP_PROPERTY_KEYS.has(c.propertyKey)) continue;
+		const snake = c.propertyKey.replace(/([A-Z])/g, "_$1").toLowerCase();
+		if (TIMESTAMP_COLUMN_NAMES.has(snake)) continue;
+		validKeys.add(c.propertyKey);
+	}
+	for (const [key, value] of Object.entries(body)) {
+		if (!validKeys.has(key)) continue;
+		writable[key] = value;
+	}
+	return writable;
+}
+
+/**
+ * Snapshot an entity's `@Column`-tracked fields for the audit before/
+ * after diff. Deep-cloned via `structuredClone` so a downstream sink
+ * that mutates the snapshot (e.g. "redact this field before logging")
+ * can't echo the change back into the live entity.
+ *
+ * Falls back to a per-key copy when the entity contains a non-
+ * clonable value (a function, a class instance with a non-clonable
+ * field). The fallback is shallow but warned ONCE per process so
+ * operators see it.
+ */
+function snapshotEntity(
+	entity: Record<string, unknown>,
+	columns: ReadonlyArray<ColumnMetadata>,
+): Record<string, unknown> {
+	const out: Record<string, unknown> = {};
+	for (const c of columns) out[c.propertyKey] = entity[c.propertyKey];
+	try {
+		return structuredClone(out);
+	} catch (err) {
+		if (!_auditCloneWarnEmitted) {
+			_auditCloneWarnEmitted = true;
+			const detail = err instanceof Error ? err.message : String(err);
+			console.warn(
+				`[station] structuredClone failed on an audit snapshot — falling back to shallow copy. A column value isn't structurally cloneable: ${detail}. Snapshot mutations downstream MAY reach the live entity.`,
+			);
+		}
+		return out;
+	}
+}
+let _auditCloneWarnEmitted = false;
+
+export default class StationProvider {
+	#contexts: Map<Resource, ResourceContext> = new Map();
+	#started = false;
+	// 54.7 auth state — populated when warden is wired AND
+	// StationConfig.requireAuth is true (default when warden is present).
+	#authManager: WardenAuthManager | undefined;
+	#authConfig: Required<Pick<StationConfig, "loginPath" | "cookieName">> & {
+		requireAuth: boolean;
+		requireRole: string | undefined;
+	} = {
+		requireAuth: false,
+		requireRole: undefined,
+		loginPath: "/admin/login",
+		cookieName: "station_auth",
+	};
+
+	constructor(protected app: StationAppContext) {}
+
+	register(): void {
+		this.app.container.singleton(ResourceRegistry, () => {
+			const registry = new ResourceRegistry();
+			_setStation(registry);
+			return registry;
+		});
+		this.app.container.singleton("station", () =>
+			this.app.container.resolve<ResourceRegistry>(ResourceRegistry),
+		);
+	}
+
+	async boot(): Promise<void> {
+		// Force-resolve so `_setStation` runs even if no preload touches the
+		// singleton. Mirrors AuroraProvider.boot().
+		this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+	}
+
+	async start(): Promise<void> {
+		if (this.#started) return;
+
+		const registry =
+			this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		const resources = registry.all();
+		if (resources.length === 0) return;
+
+		// 54.7 — read the optional `station` config block. Defaults bake
+		// in `requireAuth: true` when @c9up/warden is detected later in
+		// Phase 1, so a host that just installs the peer gets the auth
+		// gate without any extra config.
+		const userConfig = this.app.config.get<StationConfig>("station") ?? {};
+
+		// Phase 1 — lazy peer imports (router + atlas). A missing optional
+		// peer is a degraded-host signal: #loadPeers returns null → silent stop.
+		const peers = await this.#loadPeers();
+		if (!peers) return;
+		const { router, atlas } = peers;
+
+		// Phase 1b — wire the warden auth gate (or warn-once when it stays open).
+		this.#configureAuth(userConfig);
+
+		// Phase 2 — build per-resource context ONCE. `#resolveDb()` is
+		// loud: if the host installed `@c9up/atlas` but didn't register
+		// `@c9up/atlas/provider` in `reamrc.ts`, AC11's "surface
+		// AtlasProvider misconfiguration" intent kicks in.
+		const db = this.#resolveDb();
+		for (const resource of resources) {
+			this.#contexts.set(resource, buildResourceContext(resource, db, atlas));
+		}
+
+		// 56.5 + 54.6 + CSRF boot-time warn-onces. We surface the "auth
+		// wired but no permissions seeded", "no audit sink", and "no CSRF
+		// check" gaps loud-and-once so a half-wired install can't ship to
+		// prod without operators noticing.
+		this.#warnSeedPermissionsOnce(resources);
+		this.#warnAuditGapsOnce(resources);
+		this.#warnCsrfGapOnce(resources);
+
+		// Phase 3 — route registration. The router proxy may still throw
+		// "Router accessed before initialization" on first property access
+		// (boot ordering hazard where the proxy module imported but
+		// Ignitor's `_setRouter` never fired). That's another legitimate
+		// degraded-host shape — silent return. Anything else (slug
+		// collision, future validation) propagates.
+		try {
+			this.#registerAdminRoutes(router, resources);
+		} catch (err) {
+			if (isRouterProxyUninit(err)) return;
+			throw err;
+		}
+
+		this.#started = true;
+	}
+
+	/**
+	 * Phase 1 — lazy-import the optional `@c9up/ream/services/router` +
+	 * `@c9up/atlas` peers. Returns null when either is module-not-found (a
+	 * legitimate degraded-host signal); re-throws anything else.
+	 */
+	async #loadPeers(): Promise<{
+		router: StationRouter;
+		atlas: AtlasModule;
+	} | null> {
+		try {
+			const routerMod = loadBearingCast<{ default: StationRouter }>(
+				await import("@c9up/ream/services/router"),
+			);
+			const atlas = loadBearingCast<AtlasModule>(await import("@c9up/atlas"));
+			return { router: routerMod.default, atlas };
+		} catch (err) {
+			if (isModuleNotFound(err)) return null;
+			throw err;
+		}
+	}
+
+	/**
+	 * Wire the warden auth gate from the `station` config block. When warden is
+	 * not installed/bound the gate stays open and a one-time warning is emitted.
+	 */
+	#configureAuth(userConfig: StationConfig): void {
+		const wardenWanted = userConfig.requireAuth !== false;
+		if (wardenWanted) {
+			try {
+				this.#authManager =
+					this.app.container.resolve<WardenAuthManager>("auth");
+				this.#authConfig = {
+					requireAuth: true,
+					requireRole: userConfig.requireRole,
+					loginPath: userConfig.loginPath ?? "/admin/login",
+					cookieName: userConfig.cookieName ?? "station_auth",
+				};
+			} catch {
+				// Container has no `auth` binding → warden not wired. Fall through
+				// to the legacy open-by-default mode and warn-once below.
+			}
+		}
+		if (!this.#authConfig.requireAuth && !_authWarnEmitted) {
+			_authWarnEmitted = true;
+			console.warn(
+				"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) + Station 54.4 policy gates BEFORE production. See https://ream.dev/modules/station#auth.",
+			);
+		}
+	}
+
+	/** Phase 3 — mount the login surface + per-resource CRUD routes. */
+	#registerAdminRoutes(
+		router: StationRouter,
+		resources: ReadonlyArray<Resource>,
+	): void {
+		// 54.7 — mount login surface first when auth is required, so
+		// `/admin/login` is reachable even when the auth gate redirects every
+		// other path to it.
+		if (this.#authConfig.requireAuth && this.#authManager !== undefined) {
+			router.get("/admin/login", this.#buildLoginFormHandler());
+			router.post("/admin/login", this.#buildLoginPostHandler());
+			router.post("/admin/logout", this.#buildLogoutHandler());
+		}
+
+		const gate = (
+			handler: (ctx: StationHttpContext) => Promise<void>,
+		): ((ctx: StationHttpContext) => Promise<void>) =>
+			this.#authConfig.requireAuth ? this.#withAuth(handler) : handler;
+
+		for (const resource of resources) {
+			const slug = resource.name;
+			if (resource.actions.includes("list")) {
+				router.get(`/admin/${slug}`, gate(this.#buildListHandler(resource)));
+			}
+			if (resource.actions.includes("create")) {
+				router.get(
+					`/admin/${slug}/new`,
+					gate(this.#buildNewFormHandler(resource)),
+				);
+				router.post(`/admin/${slug}`, gate(this.#buildCreateHandler(resource)));
+			}
+			if (resource.actions.includes("show")) {
+				router.get(
+					`/admin/${slug}/:id`,
+					gate(this.#buildShowHandler(resource)),
+				);
+			}
+			if (resource.actions.includes("edit")) {
+				router.get(
+					`/admin/${slug}/:id/edit`,
+					gate(this.#buildEditFormHandler(resource)),
+				);
+				router.put(
+					`/admin/${slug}/:id`,
+					gate(this.#buildUpdateHandler(resource)),
+				);
+				// Browser forms can't issue PUT — accept POST with `_method=PUT`
+				// from the auto-generated form (form.ts stamps the hidden input).
+				router.post(
+					`/admin/${slug}/:id`,
+					gate(this.#buildMethodOverrideHandler(resource)),
+				);
+			}
+			if (resource.actions.includes("destroy")) {
+				router.delete(
+					`/admin/${slug}/:id`,
+					gate(this.#buildDestroyHandler(resource)),
+				);
+			}
+		}
+	}
+
+	/**
+	 * 56.5 — every admin action is now gated behind a
+	 * `<resource>.<action>` permission resolved through @c9up/warden
+	 * (`auth.hasPermission`). Warn ONCE at boot, only when the auth layer
+	 * is wired, that the host must seed roles/grants in the Warden rights
+	 * store — otherwise every admin request 403s with no hint. The old
+	 * "missing policy entry" warning is gone with the 54.4 callback table.
+	 */
+	#warnSeedPermissionsOnce(resources: ReadonlyArray<Resource>): void {
+		if (_seedPermsWarned) return;
+		// Only meaningful once the Warden layer is wired — the dev-preview /
+		// no-warden path leaves the gate open, so there's nothing to seed.
+		if (this.#authManager === undefined) return;
+		if (resources.length === 0) return;
+		_seedPermsWarned = true;
+		const example = resources[0];
+		console.warn(
+			`[station] Admin actions are gated behind '<resource>.<action>' permissions resolved through @c9up/warden (e.g. '${example.name}.list', '${example.name}.create'). Seed roles/grants in the Warden rights store (store.defineRole('admin', ['${example.name}.list', '${example.name}.create', ...]) then assignRole) or every admin request will 403. See https://ream.dev/modules/station#authorization.`,
+		);
+	}
+
+	#warnCsrfGapOnce(resources: ReadonlyArray<Resource>): void {
+		if (_csrfWarnEmitted) return;
+		const writeActions: ReadonlyArray<ResourceAction> = [
+			"create",
+			"edit",
+			"destroy",
+		];
+		const writeEnabled = resources.some((r) =>
+			r.actions.some((a) => writeActions.includes(a)),
+		);
+		if (!writeEnabled) return;
+		_csrfWarnEmitted = true;
+		console.warn(
+			"[station] Write-enabled resources are mounted but Station does NOT enforce CSRF at the handler level. Wire @c9up/blackhole (csrf: true) or an equivalent middleware in start/kernel.ts BEFORE production — a missing CSRF check on /admin/<resource>/:id POST allows cross-site form submission to mutate rows under any logged-in user's session.",
+		);
+	}
+
+	#warnAuditGapsOnce(resources: ReadonlyArray<Resource>): void {
+		if (_missingAuditWarned) return;
+		const writeActions: ReadonlyArray<ResourceAction> = [
+			"create",
+			"edit",
+			"destroy",
+		];
+		const missing = resources.filter(
+			(r) =>
+				r.audit === undefined &&
+				r.actions.some((a) => writeActions.includes(a)),
+		);
+		if (missing.length === 0) return;
+		_missingAuditWarned = true;
+		console.warn(
+			`[station] No audit sink configured for write-enabled resources: ${missing.map((r) => r.name).join(", ")}. Pass 'audit:' in defineResource() to persist mutations to your audit log.`,
+		);
+	}
+
+	async ready(): Promise<void> {}
+
+	async shutdown(): Promise<void> {}
+
+	#requireContext(resource: Resource): ResourceContext {
+		const ctx = this.#contexts.get(resource);
+		if (!ctx) {
+			throw new Error(
+				`[station] No repository available for ${resource.entity.name}. Did you register @c9up/atlas/provider in reamrc.ts?`,
+			);
+		}
+		return ctx;
+	}
+
+	#buildListHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			// 56.5: the list action is gated behind `<resource>.list` like
+			// every other action — resolved through the Warden `"auth"`
+			// layer. (Retro 2026-06-01: list previously skipped the gate
+			// entirely, leaking the index regardless of authorization.)
+			if (!(await authorizeAction(resource, "list", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
+			const qs = ctx.request.qs();
+			const page = clampPositiveInt(qs.page, 1);
+			const perPageRaw = clampPositiveInt(qs.perPage, DEFAULT_PER_PAGE);
+			const perPage = Math.min(perPageRaw, MAX_PER_PAGE);
+			if (perPage < perPageRaw && !_perPageClampWarned) {
+				_perPageClampWarned = true;
+				console.warn(
+					`[station] perPage clamped to ${MAX_PER_PAGE} (got ${perPageRaw}). Suppressing further warnings.`,
+				);
+			}
+
+			const total = await repo.query().count();
+			const lastPage = Math.max(1, Math.ceil(total / perPage));
+			if (page > lastPage && total > 0) {
+				// Never render an empty page when one exists — redirect to the
+				// last real page so the user lands on something useful.
+				ctx.response.redirect(
+					`/admin/${resource.name}?page=${lastPage}&perPage=${perPage}`,
+				);
+				return;
+			}
+
+			const rows = await repo
+				.query()
+				.orderBy(pkColumn, "desc")
+				.forPage(page, perPage)
+				.exec();
+			const html = renderListPage({
+				resource,
+				rows,
+				columns,
+				pkColumn,
+				page,
+				perPage,
+				total,
+				lastPage,
+			});
+			ctx.response.type("text/html; charset=utf-8");
+			ctx.response.send(html);
+		};
+	}
+
+	#buildShowHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			const id = ctx.params.id ?? "";
+			const row = await repo.find(id);
+			if (row === null) {
+				ctx.response.status(404);
+				ctx.response.type("text/html; charset=utf-8");
+				ctx.response.send(renderNotFoundPage({ resource, id }));
+				return;
+			}
+			if (!(await authorizeAction(resource, "show", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
+			const html = renderShowPage({
+				resource,
+				row,
+				columns,
+				pkColumn,
+			});
+			ctx.response.type("text/html; charset=utf-8");
+			ctx.response.send(html);
+		};
+	}
+
+	#buildNewFormHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { columns, pkColumn } = this.#requireContext(resource);
+			if (
+				!(await authorizeAction(resource, "create", ctx, this.#authManager))
+			) {
+				deny(ctx);
+				return;
+			}
+			const html = renderFormPage({
+				resource,
+				columns,
+				pkColumn,
+				hiddenInputs: csrfHiddenInputs(ctx),
+			});
+			ctx.response.type("text/html; charset=utf-8");
+			ctx.response.send(html);
+		};
+	}
+
+	#buildCreateHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			if (
+				!(await authorizeAction(resource, "create", ctx, this.#authManager))
+			) {
+				deny(ctx);
+				return;
+			}
+			const body = await readBody(ctx);
+			// Mass-assignment guard: only `@Column`-declared properties make
+			// it through to repo.create(). An attacker who POSTs
+			// `{ role: "admin" }` or `{ passwordHash: "x" }` against a
+			// resource that doesn't declare those columns has the keys
+			// silently dropped here. PK + framework timestamps are always
+			// excluded — they're decided by the DB / hooks, not the caller.
+			const filtered = filterWritableBody(body, columns, pkColumn);
+			const created = await repo.create(filtered);
+			await emitAudit(resource, {
+				action: "create",
+				resource: resource.name,
+				recordId: created[pkColumn],
+				userId: ctx.auth?.user?.id,
+				after: snapshotEntity(created, columns),
+				at: new Date(),
+			});
+			redirectToShow(ctx, resource, created[pkColumn]);
+		};
+	}
+
+	#buildEditFormHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			const id = ctx.params.id ?? "";
+			const row = await repo.find(id);
+			if (row === null) {
+				ctx.response.status(404);
+				ctx.response.type("text/html; charset=utf-8");
+				ctx.response.send(renderNotFoundPage({ resource, id }));
+				return;
+			}
+			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
+			const html = renderFormPage({
+				resource,
+				columns,
+				pkColumn,
+				row,
+				hiddenInputs: csrfHiddenInputs(ctx),
+			});
+			ctx.response.type("text/html; charset=utf-8");
+			ctx.response.send(html);
+		};
+	}
+
+	#buildUpdateHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			const id = ctx.params.id ?? "";
+			const entity = await repo.find(id);
+			if (entity === null) {
+				ctx.response.status(404);
+				ctx.response.type("text/html; charset=utf-8");
+				ctx.response.send(renderNotFoundPage({ resource, id }));
+				return;
+			}
+			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
+			const body = await readBody(ctx);
+			// Snapshot BEFORE the mutation runs so the audit diff is
+			// meaningful (entity is a BaseEntity; its dirty-tracking
+			// would shadow the original values after setProp).
+			const beforeSnapshot = snapshotEntity(entity, columns);
+			// Mass-assignment guard: filterWritableBody drops every key
+			// that isn't an `@Column`-declared property, plus the PK and
+			// any framework timestamps (created_at / updated_at /
+			// deleted_at). An attacker who POSTs `{ role: "admin" }` to
+			// a resource without that column has the field silently
+			// dropped instead of overwriting the entity.
+			const writable = filterWritableBody(body, columns, pkColumn);
+			for (const [key, value] of Object.entries(writable)) {
+				entity.setProp(key, value);
+			}
+			await repo.save(entity);
+			const afterSnapshot = snapshotEntity(entity, columns);
+			await emitAudit(resource, {
+				action: "edit",
+				resource: resource.name,
+				recordId: entity[pkColumn],
+				userId: ctx.auth?.user?.id,
+				before: beforeSnapshot,
+				after: afterSnapshot,
+				at: new Date(),
+			});
+			redirectToShow(ctx, resource, entity[pkColumn]);
+		};
+	}
+
+	#buildMethodOverrideHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		// Browser forms can only emit GET / POST. The auto-generated edit
+		// form ships `<input type="hidden" name="_method" value="PUT">`
+		// so the POST /admin/:r/:id endpoint can route to the update
+		// handler. A POST without `_method=PUT` (or with `_method=DELETE`)
+		// dispatches accordingly.
+		const updateHandler = this.#buildUpdateHandler(resource);
+		const destroyHandler = this.#buildDestroyHandler(resource);
+		return async (ctx) => {
+			const body = await readBody(ctx);
+			const override = String(body._method ?? "").toUpperCase();
+			if (override === "PUT" || override === "PATCH") {
+				return updateHandler(ctx);
+			}
+			if (override === "DELETE") {
+				return destroyHandler(ctx);
+			}
+			// Unsupported override — refuse rather than silently downgrade
+			// to a no-op so misconfigured forms surface immediately.
+			ctx.response.status(405);
+			ctx.response.type("text/html; charset=utf-8");
+			ctx.response.send(
+				`<h1>405 Method Not Allowed</h1><p>POST /admin/${escapeMin(resource.name)}/:id requires <code>_method=PUT</code> or <code>_method=DELETE</code>.</p>`,
+			);
+		};
+	}
+
+	#buildDestroyHandler(
+		resource: Resource,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx) => {
+			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			const id = ctx.params.id ?? "";
+			const row = await repo.find(id);
+			if (row === null) {
+				ctx.response.status(404);
+				ctx.response.type("text/html; charset=utf-8");
+				ctx.response.send(renderNotFoundPage({ resource, id }));
+				return;
+			}
+			if (
+				!(await authorizeAction(resource, "destroy", ctx, this.#authManager))
+			) {
+				deny(ctx);
+				return;
+			}
+			const before = snapshotEntity(row, columns);
+			await repo.delete(row);
+			await emitAudit(resource, {
+				action: "destroy",
+				resource: resource.name,
+				recordId: row[pkColumn],
+				userId: ctx.auth?.user?.id,
+				before,
+				at: new Date(),
+			});
+			ctx.response.redirect(`/admin/${encodeURIComponent(resource.name)}`);
+		};
+	}
+
+	#resolveDb(): unknown {
+		try {
+			return this.app.container.resolve<unknown>("db");
+		} catch (cause) {
+			throw new Error(
+				`[station] No 'db' connection registered. Did you register @c9up/atlas/provider in reamrc.ts?`,
+				{ cause },
+			);
+		}
+	}
+
+	// ───────────────────────────────────────────────────────────────────────
+	// Story 54.7 — Warden integration
+	// ───────────────────────────────────────────────────────────────────────
+
+	/**
+	 * Resolve the inbound auth token. Cookie wins over Authorization
+	 * header because the cookie is what the login handler set; the
+	 * Bearer fallback exists for API-style callers (curl / fetch with
+	 * Authorization).
+	 */
+	#readAuthToken(ctx: StationHttpContext): string | undefined {
+		const cookieName = this.#authConfig.cookieName;
+		const fromCookie = ctx.request.cookie?.(cookieName);
+		if (typeof fromCookie === "string" && fromCookie.length > 0) {
+			return fromCookie;
+		}
+		const authHeader = ctx.request.header?.("authorization");
+		if (typeof authHeader === "string" && authHeader.length > 0) {
+			const trimmed = authHeader.trim();
+			if (trimmed.toLowerCase().startsWith("bearer ")) {
+				return trimmed.slice(7).trim();
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Decide whether to redirect (HTML browser flow) or 401-json (XHR /
+	 * API flow). `Accept: application/json` OR `X-Requested-With:
+	 * XMLHttpRequest` triggers the JSON shape; everything else gets the
+	 * 302 to the login page.
+	 */
+	#wantsJsonResponse(ctx: StationHttpContext): boolean {
+		const accept = ctx.request.header?.("accept");
+		if (typeof accept === "string" && accept.includes("application/json")) {
+			return true;
+		}
+		const xrw = ctx.request.header?.("x-requested-with");
+		if (typeof xrw === "string" && xrw.toLowerCase() === "xmlhttprequest") {
+			return true;
+		}
+		return false;
+	}
+
+	/**
+	 * Wrap a CRUD handler with the auth gate. Reads token from cookie/
+	 * header → `authManager.verify(token)` → on success populates
+	 * `ctx.auth.user` (and `ctx.auth.roles` when present on the user
+	 * record) and delegates. On failure: JSON callers get 401, HTML
+	 * callers get a 302 to `loginPath`.
+	 *
+	 * Role check (`requireRole`) is applied AFTER auth: an authenticated
+	 * user without the role gets 403 (or 403-json), never a redirect —
+	 * a redirect to login wouldn't help them.
+	 */
+	#withAuth(
+		handler: (ctx: StationHttpContext) => Promise<void>,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx: StationHttpContext): Promise<void> => {
+			const manager = this.#authManager;
+			if (manager === undefined) {
+				// Auth gate enabled but no manager wired — shouldn't happen
+				// because we only set requireAuth=true when the container
+				// resolved `auth`. Fail closed: treat as a 500.
+				ctx.response.status(500);
+				ctx.response.type("text/plain; charset=utf-8");
+				ctx.response.send(
+					"[station] auth gate enabled but AuthManager missing",
+				);
+				return;
+			}
+			const token = this.#readAuthToken(ctx);
+			if (token === undefined) {
+				if (this.#wantsJsonResponse(ctx)) {
+					ctx.response.status(401);
+					ctx.response.json({ error: "authentication required" });
+					return;
+				}
+				ctx.response.redirect(this.#authConfig.loginPath);
+				return;
+			}
+			const result = await manager.verify(token);
+			if (!result.authenticated || result.user === undefined) {
+				if (this.#wantsJsonResponse(ctx)) {
+					ctx.response.status(401);
+					ctx.response.json({
+						error: result.error ?? "invalid or expired session",
+					});
+					return;
+				}
+				// Clear stale cookie so the browser doesn't retry with the
+				// same dead token on every refresh.
+				ctx.response.clearCookie?.(this.#authConfig.cookieName, {
+					path: "/",
+				});
+				ctx.response.redirect(this.#authConfig.loginPath);
+				return;
+			}
+			const user = result.user;
+			const rawRoles = user.roles;
+			// `userRoles` is still derived for view rendering (ctx.auth.roles
+			// below), but the GATE decision now comes from the Warden
+			// resolver via `auth.hasRole` — no parallel Station-local RBAC
+			// (D5/AC-E6). A forgotten `await` would make a truthy Promise
+			// pass the `!` test = silent allow, so the call is awaited.
+			const userRoles: string[] = Array.isArray(rawRoles)
+				? rawRoles.filter((r): r is string => typeof r === "string")
+				: [];
+			const required = this.#authConfig.requireRole;
+			if (
+				required !== undefined &&
+				!(await manager.hasRole(user, required, "global"))
+			) {
+				if (this.#wantsJsonResponse(ctx)) {
+					ctx.response.status(403);
+					ctx.response.json({ error: "insufficient role" });
+					return;
+				}
+				ctx.response.status(403);
+				ctx.response.type("text/plain; charset=utf-8");
+				ctx.response.send("Forbidden");
+				return;
+			}
+			const existingAuth = ctx.auth ?? {};
+			ctx.auth = {
+				...existingAuth,
+				user,
+				roles: userRoles.length > 0 ? userRoles : existingAuth.roles,
+			};
+			await handler(ctx);
+		};
+	}
+
+	/**
+	 * `GET /admin/login` — render the sign-in form. If the caller is
+	 * already authenticated, redirect to `/admin` to avoid bouncing them
+	 * back through the form they don't need.
+	 */
+	#buildLoginFormHandler(): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx: StationHttpContext): Promise<void> => {
+			const manager = this.#authManager;
+			if (manager !== undefined) {
+				const token = this.#readAuthToken(ctx);
+				if (typeof token === "string" && token.length > 0) {
+					const result = await manager.verify(token);
+					if (result.authenticated) {
+						ctx.response.redirect("/admin");
+						return;
+					}
+				}
+			}
+			const qs = ctx.request.qs();
+			const errorParam = qs.error;
+			const html = renderLoginPage({
+				action: this.#authConfig.loginPath,
+				error: typeof errorParam === "string" ? errorParam : undefined,
+				hiddenInputs: csrfHiddenInputs(ctx),
+			});
+			ctx.response.type("text/html; charset=utf-8");
+			ctx.response.send(html);
+		};
+	}
+
+	/**
+	 * `POST /admin/login` — accept `{email, password}`, run them through
+	 * `authManager.authenticate`, set the session cookie on success.
+	 * Re-renders the form with an inline error on failure (preserves the
+	 * submitted email so the user doesn't retype it).
+	 */
+	#buildLoginPostHandler(): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx: StationHttpContext): Promise<void> => {
+			const manager = this.#authManager;
+			if (manager === undefined) {
+				ctx.response.status(500);
+				ctx.response.type("text/plain; charset=utf-8");
+				ctx.response.send("[station] login posted but AuthManager missing");
+				return;
+			}
+			const body = await readBody(ctx);
+			const email = typeof body.email === "string" ? body.email.trim() : "";
+			const password = typeof body.password === "string" ? body.password : "";
+			if (email.length === 0 || password.length === 0) {
+				const html = renderLoginPage({
+					action: this.#authConfig.loginPath,
+					email,
+					error: "Email and password are both required.",
+					hiddenInputs: csrfHiddenInputs(ctx),
+				});
+				ctx.response.status(400);
+				ctx.response.type("text/html; charset=utf-8");
+				ctx.response.send(html);
+				return;
+			}
+			const result = await manager.authenticate({ email, password });
+			// Warden returns the issued token on `user.token`, not at the
+			// top level — reading `result.token` (which never exists) sent
+			// every valid login down the 401 branch.
+			const token =
+				typeof result.user?.token === "string" ? result.user.token : undefined;
+			if (!result.authenticated || token === undefined) {
+				const html = renderLoginPage({
+					action: this.#authConfig.loginPath,
+					email,
+					error: result.error ?? "Invalid email or password.",
+					hiddenInputs: csrfHiddenInputs(ctx),
+				});
+				ctx.response.status(401);
+				ctx.response.type("text/html; charset=utf-8");
+				ctx.response.send(html);
+				return;
+			}
+			ctx.response.cookie?.(this.#authConfig.cookieName, token, {
+				httpOnly: true,
+				sameSite: "Lax",
+				secure: process.env.NODE_ENV === "production",
+				path: "/",
+			});
+			ctx.response.redirect("/admin");
+		};
+	}
+
+	/**
+	 * `POST /admin/logout` — clear the session cookie and redirect to
+	 * the login page. POST (not GET) so a crafted `<img src>` can't log
+	 * someone out via CSRF.
+	 */
+	#buildLogoutHandler(): (ctx: StationHttpContext) => Promise<void> {
+		return async (ctx: StationHttpContext): Promise<void> => {
+			ctx.response.clearCookie?.(this.#authConfig.cookieName, {
+				path: "/",
+			});
+			ctx.response.redirect(this.#authConfig.loginPath);
+		};
+	}
+}
+
+/**
+ * Cross-package bridge — Station's `Resource.entity` is intentionally
+ * typed `new (...args: never[]) => unknown` so the package type-compiles
+ * without `@c9up/atlas` installed (peer is optional, memory
+ * `project_package_extraction`). At the route-mount boundary we hand
+ * the same constructor to Atlas's `BaseRepository`, whose signature is
+ * `new () => T extends BaseEntity`. The narrowing casts live in this
+ * single helper rather than at every call site (mirrors AC9-style
+ * single-load-bearing-site convention from 54.1).
+ */
+function buildResourceContext(
+	resource: Resource,
+	db: unknown,
+	atlas: AtlasModule,
+): ResourceContext {
+	const entityCtor = loadBearingCast<
+		ConstructorParameters<typeof AtlasBaseRepository>[0]
+	>(resource.entity);
+	const conn = loadBearingCast<DatabaseConnection>(db);
+	const repo = loadBearingCast<StationRepository>(
+		new atlas.BaseRepository(entityCtor, conn),
+	);
+	const columns = atlas.getColumnMetadata(resource.entity);
+	const pkColumn = atlas.getPrimaryKey(resource.entity) ?? "id";
+	return { repo, columns, pkColumn };
+}
+
+/**
+ * SANCTIONED CROSS-PACKAGE NARROWING — the ONE production site in
+ * `@c9up/station` where `as T` is permitted. Memory `feedback_no_any_types`
+ * is honoured by funnelling every load-bearing narrow (dynamic peer
+ * imports, IoC-resolved `db`, atlas-agnostic `Resource.entity` handed to
+ * Atlas's `BaseRepository`) through this single function. Analogous to
+ * 54.1's AC9 exception (`{} as ResourceRegistry` in `services/main.ts`)
+ * and the test-side `tests/__helpers__/bypass-type-check.ts`. Every
+ * call site MUST carry a rationale comment explaining why static
+ * narrowing isn't expressible at the boundary. NEVER widen this helper
+ * beyond `unknown → T`.
+ */
+function loadBearingCast<T>(value: unknown): T {
+	return value as T;
+}
+
+/**
+ * Parse a query-string value as a positive integer with a fallback.
+ * Strict: only `^[1-9][0-9]*$` is accepted — empty, missing, leading
+ * zero, fractional (`1.7`), exponent (`1e3`), trailing garbage (`1abc`),
+ * negative, and non-numeric all fall back. Clamp range is [1, +∞).
+ */
+function clampPositiveInt(raw: string | undefined, fallback: number): number {
+	if (typeof raw !== "string" || !POSITIVE_INT_RE.test(raw)) return fallback;
+	const n = Number.parseInt(raw, 10);
+	return Number.isFinite(n) && n >= 1 ? n : fallback;
+}
+
+/**
+ * Node's ERR_MODULE_NOT_FOUND surfaces on an Error subclass with `code`.
+ * Exported (with `_internal` prefix) for the 54.8 agnostic-peer-missing
+ * unit test which can't realistically simulate the dynamic-import
+ * failure path inside vitest's mock graph.
+ */
+export function _isModuleNotFound(err: unknown): boolean {
+	return isModuleNotFound(err);
+}
+
+function isModuleNotFound(err: unknown): boolean {
+	if (err === null || typeof err !== "object" || !("code" in err)) return false;
+	const { code } = err;
+	return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND";
+}
+
+/** Ream's router proxy throws this exact string before Ignitor wires it. */
+function isRouterProxyUninit(err: unknown): boolean {
+	return (
+		err instanceof Error &&
+		err.message.includes("Router accessed before initialization")
+	);
+}
+
+/**
+ * 56.5 authorization gate. Returns true when the action is allowed.
+ * Station authorizes EXCLUSIVELY through Warden's unified layer: the
+ * decision is `auth.hasPermission(user, "<resource>.<action>", scope)`
+ * resolved via the container `"auth"` AuthManager (D1/D2). No
+ * Station-local RBAC computation, no token-payload read.
+ *
+ *   - `authManager === undefined` ⇒ OPEN (returns true). This is the
+ *     dev-preview / no-warden path — UNCHANGED from the legacy
+ *     `if (!authEnabled) return true`. That mode already emits the loud
+ *     "no auth — not for production" boot warning; this does NOT widen
+ *     any production path.
+ *   - A guest (no `ctx.auth.user`) ⇒ DENIED (fail-closed).
+ *   - Otherwise the answer is the resolver's — permission present ⇒
+ *     allow, absent ⇒ 403.
+ *
+ * Per-row ownership is NOT expressible here (D7): the coarse permission
+ * gate has no `row`. Ownership is a Warden Bouncer-policy concern,
+ * reachable through the fuller Bouncer path (a documented follow-up).
+ *
+ * The result MUST be awaited at every call site — a forgotten `await`
+ * yields a truthy Promise = silent ALLOW (AC10 probe 3).
+ */
+async function authorizeAction(
+	resource: Resource,
+	action: ResourceAction,
+	ctx: StationHttpContext,
+	authManager: WardenAuthManager | undefined,
+	scope: StationScope = "global",
+): Promise<boolean> {
+	if (authManager === undefined) return true;
+	const user = ctx.auth?.user;
+	if (user === undefined) return false;
+	return authManager.hasPermission(user, `${resource.name}.${action}`, scope);
+}
+
+function deny(ctx: StationHttpContext): void {
+	ctx.response.status(403);
+	ctx.response.type("text/html; charset=utf-8");
+	ctx.response.send(
+		"<h1>403 Forbidden</h1><p>Your account does not have access to this resource action.</p>",
+	);
+}
+
+async function readBody(
+	ctx: StationHttpContext,
+): Promise<Record<string, unknown>> {
+	if (typeof ctx.request.body !== "function") return {};
+	const raw = await ctx.request.body();
+	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
+	return raw as Record<string, unknown>;
+}
+
+/**
+ * Read the CSRF token (when present) from `ctx.store` and shape it as
+ * a `hiddenInputs[]` entry for `renderFormPage`. The key `csrfToken`
+ * matches the @c9up/blackhole `csrfToken` convention so a fully-
+ * wired host stamps the token automatically; a host that doesn't wire
+ * CSRF returns no hidden input, and the form is unprotected (the
+ * boot-time warn-once already flagged this).
+ *
+ * The form field is named `_csrf` to match Adonis / Blackhole's
+ * default. Hosts using a different field name can override by writing
+ * their own hiddenInputs into ctx.store under a richer key, but for
+ * the common case this is the zero-config path.
+ */
+function csrfHiddenInputs(
+	ctx: StationHttpContext,
+): ReadonlyArray<{ name: string; value: string }> | undefined {
+	if (ctx.store === undefined) return undefined;
+	const token = ctx.store.get("csrfToken");
+	if (typeof token !== "string" || token.length === 0) return undefined;
+	return [{ name: "_csrf", value: token }];
+}
+
+function redirectToShow(
+	ctx: StationHttpContext,
+	resource: Resource,
+	id: unknown,
+): void {
+	const slug = encodeURIComponent(resource.name);
+	const safeId = encodeURIComponent(String(id ?? ""));
+	ctx.response.redirect(`/admin/${slug}/${safeId}`);
+}
+
+/**
+ * 54.6 audit emission. The sink runs AFTER the write commits, so a
+ * failed mutation never produces a misleading audit row. Sink errors
+ * are logged to stderr but never re-thrown — an audit pipeline outage
+ * must not block the user-facing request.
+ */
+async function emitAudit(resource: Resource, event: AuditEvent): Promise<void> {
+	if (resource.audit === undefined) return;
+	try {
+		await resource.audit(event);
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		// COMPLIANCE GAP: the mutation committed but its audit row was
+		// lost. Logged at error level (not warn) so monitoring surfaces
+		// it, and handed to the optional onAuditError hook so a
+		// compliance-serious host can alert / enqueue a retry. The hook
+		// is wrapped so a throwing handler can't crash the request.
+		console.error(
+			`[station] COMPLIANCE GAP: audit sink for resource '${resource.name}' threw on ${event.action} (record ${String(event.recordId)}): ${detail}. The operation succeeded but the audit row was NOT recorded.`,
+		);
+		if (resource.onAuditError !== undefined) {
+			try {
+				resource.onAuditError(event, err);
+			} catch (hookErr) {
+				const hookDetail =
+					hookErr instanceof Error ? hookErr.message : String(hookErr);
+				console.error(
+					`[station] onAuditError handler for resource '${resource.name}' itself threw: ${hookDetail}.`,
+				);
+			}
+		}
+	}
+}
+
+/**
+ * Tiny HTML-escape for the 405 error body — duplicated here rather
+ * than imported from views/escape.ts to keep the dependency surface
+ * of StationProvider minimal (views are otherwise only reached via
+ * the renderer modules).
+ */
+function escapeMin(value: string): string {
+	return value
+		.replace(/&/g, "&amp;")
+		.replace(/</g, "&lt;")
+		.replace(/>/g, "&gt;")
+		.replace(/"/g, "&quot;");
+}
