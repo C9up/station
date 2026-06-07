@@ -452,7 +452,7 @@ export default class StationProvider {
 		// Phase 3 — route registration. The router proxy may still throw
 		// "Router accessed before initialization" on first property access
 		// (boot ordering hazard where the proxy module imported but
-		// Ignitor's `_setRouter` never fired). That's another legitimate
+		// Ignitor's `setRouter` never fired). That's another legitimate
 		// degraded-host shape — silent return. Anything else (slug
 		// collision, future validation) propagates.
 		try {

@@ -100,9 +100,9 @@ async function captureRoutes(): Promise<{
 }> {
 	const calls: string[] = [];
 	const routerMod = bypassTypeCheck<{
-		_setRouter: (router: unknown) => void;
+		setRouter: (router: unknown) => void;
 	}>(await import("@c9up/ream/services/router"));
-	routerMod._setRouter(
+	routerMod.setRouter(
 		bypassTypeCheck({
 			get: (p: string) => {
 				calls.push(`GET ${p}`);

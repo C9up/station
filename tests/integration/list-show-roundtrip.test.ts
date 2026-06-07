@@ -195,10 +195,10 @@ async function bootStation(opts: {
 	db: unknown;
 	resources: ReadonlyArray<Parameters<typeof defineResource>[0]>;
 }): Promise<{ routes: CapturedRoute[] }> {
-	const routerMod = bypassTypeCheck<{ _setRouter: (router: unknown) => void }>(
+	const routerMod = bypassTypeCheck<{ setRouter: (router: unknown) => void }>(
 		await import("@c9up/ream/services/router"),
 	);
-	const { _setRouter } = routerMod;
+	const { setRouter } = routerMod;
 	const routes: CapturedRoute[] = [];
 	const captureFactory =
 		(method: CapturedRoute["method"]) =>
@@ -215,10 +215,10 @@ async function bootStation(opts: {
 		put: captureFactory("put"),
 		delete: captureFactory("delete"),
 	};
-	// _setRouter expects a `Router` shape; the fake satisfies the four
+	// setRouter expects a `Router` shape; the fake satisfies the four
 	// verbs StationProvider.start() reaches for (get/post/put/delete).
 	// Routed through bypass-type-check to honour AC15's no-`as` rule.
-	_setRouter(bypassTypeCheck(fakeRouter));
+	setRouter(bypassTypeCheck(fakeRouter));
 
 	const app = buildApp(opts.db);
 	const provider = new StationProvider(app);

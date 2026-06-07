@@ -26,7 +26,7 @@ function makeApp(): {
 	// a connection. Phase 3 (route registration on the real Ream router
 	// proxy) is what these tests actually exercise — the proxy throws
 	// "Router accessed before initialization" because Ignitor never wired
-	// `_setRouter`, and StationProvider must swallow that silently.
+	// `setRouter`, and StationProvider must swallow that silently.
 	bindings.set("db", () => ({}));
 	const app: StationAppContext = {
 		container: {

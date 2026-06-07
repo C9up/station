@@ -294,7 +294,7 @@ async function bootStation(opts: {
 	stationConfig?: StationConfig;
 	resources?: ReadonlyArray<Parameters<typeof defineResource>[0]>;
 }): Promise<{ routes: CapturedRoute[] }> {
-	const routerMod = bypassTypeCheck<{ _setRouter: (router: unknown) => void }>(
+	const routerMod = bypassTypeCheck<{ setRouter: (router: unknown) => void }>(
 		await import("@c9up/ream/services/router"),
 	);
 	const routes: CapturedRoute[] = [];
@@ -307,7 +307,7 @@ async function bootStation(opts: {
 			routes.push({ method, path, handler });
 			return {};
 		};
-	routerMod._setRouter(
+	routerMod.setRouter(
 		bypassTypeCheck({
 			get: captureFactory("get"),
 			post: captureFactory("post"),
