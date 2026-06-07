@@ -16,7 +16,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	_resetStationProviderFlags,
+	resetStationProviderFlags,
 	type StationAppContext,
 } from "../../src/StationProvider.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
@@ -233,7 +233,7 @@ async function bootStation(opts: {
 
 describe("station > integration > list/show roundtrip (50 seeded users)", () => {
 	beforeEach(() => {
-		_resetStationProviderFlags();
+		resetStationProviderFlags();
 	});
 
 	it("GET /admin/users renders 25 rows by default", async () => {

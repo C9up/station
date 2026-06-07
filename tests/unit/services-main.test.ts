@@ -22,26 +22,26 @@ describe("services/main singleton", () => {
 		);
 	});
 
-	it("returns undefined from `_getStation` before binding", async () => {
+	it("returns undefined from `getStation` before binding", async () => {
 		const mod = await loadFresh();
-		expect(mod._getStation()).toBeUndefined();
+		expect(mod.getStation()).toBeUndefined();
 	});
 
-	it("forwards method calls to the bound registry after `_setStation`", async () => {
+	it("forwards method calls to the bound registry after `setStation`", async () => {
 		class User {}
 		const mod = await loadFresh();
 		const registry = new ResourceRegistry();
-		mod._setStation(registry);
+		mod.setStation(registry);
 		const userResource = defineResource({ entity: User });
 		mod.default.register(userResource);
 		expect(registry.get("users")).toBe(userResource);
-		expect(mod._getStation()).toBe(registry);
+		expect(mod.getStation()).toBe(registry);
 	});
 
 	it("returns property values (non-function) through the proxy after binding", async () => {
 		const mod = await loadFresh();
 		const registry = new ResourceRegistry();
-		mod._setStation(registry);
+		mod.setStation(registry);
 		expect(mod.default.count()).toBe(0);
 	});
 
@@ -49,7 +49,7 @@ describe("services/main singleton", () => {
 		class User {}
 		const mod = await loadFresh();
 		const registry = new ResourceRegistry();
-		mod._setStation(registry);
+		mod.setStation(registry);
 
 		const { register } = mod.default;
 		const userResource = defineResource({ entity: User });

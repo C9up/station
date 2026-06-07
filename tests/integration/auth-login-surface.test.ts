@@ -23,7 +23,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	_resetStationProviderFlags,
+	resetStationProviderFlags,
 	type StationAppContext,
 	type StationConfig,
 } from "../../src/StationProvider.js";
@@ -329,7 +329,7 @@ async function bootStation(opts: {
 
 describe("station > integration > 54.7 warden integration + login surface", () => {
 	beforeEach(() => {
-		_resetStationProviderFlags();
+		resetStationProviderFlags();
 	});
 
 	it("does NOT mount /admin/login when no auth manager is bound (legacy open mode)", async () => {

@@ -9,7 +9,7 @@
  * (memory `project_package_extraction`).
  *
  * Coverage approach:
- *   - Unit-level: `_isModuleNotFound` recognises BOTH the ESM
+ *   - Unit-level: `isModuleNotFound` recognises BOTH the ESM
  *     `ERR_MODULE_NOT_FOUND` and the CJS `MODULE_NOT_FOUND` codes —
  *     this is the predicate that branches start() between "silent
  *     return (degraded host)" vs "throw (real bug)".
@@ -27,7 +27,7 @@
  * simulate `ERR_MODULE_NOT_FOUND` from a factory (factories that
  * throw produce a generic `[vitest] There was an error when mocking`
  * wrapper, not the code-bearing error the predicate matches). The
- * exported `_isModuleNotFound` covers that branch with a real
+ * exported `isModuleNotFound` covers that branch with a real
  * Node-shaped error.
  */
 import "reflect-metadata";
@@ -35,8 +35,8 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	_isModuleNotFound,
-	_resetStationProviderFlags,
+	isModuleNotFound,
+	resetStationProviderFlags,
 	type StationAppContext,
 	type StationConfig,
 } from "../../src/StationProvider.js";
@@ -132,13 +132,13 @@ async function captureRoutes(): Promise<{
 
 describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 	beforeEach(() => {
-		_resetStationProviderFlags();
+		resetStationProviderFlags();
 	});
 
-	describe("_isModuleNotFound predicate (degraded-host vs real-bug branch)", () => {
+	describe("isModuleNotFound predicate (degraded-host vs real-bug branch)", () => {
 		it("recognises ESM ERR_MODULE_NOT_FOUND", () => {
 			expect(
-				_isModuleNotFound(
+				isModuleNotFound(
 					makeError("ERR_MODULE_NOT_FOUND", "Cannot find module '@c9up/atlas'"),
 				),
 			).toBe(true);
@@ -146,7 +146,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 
 		it("recognises CJS MODULE_NOT_FOUND fallback", () => {
 			expect(
-				_isModuleNotFound(
+				isModuleNotFound(
 					makeError("MODULE_NOT_FOUND", "Cannot find module '@c9up/atlas'"),
 				),
 			).toBe(true);
@@ -154,17 +154,17 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 
 		it("rejects any other error code → real bug propagates", () => {
 			expect(
-				_isModuleNotFound(makeError("ERR_INVALID_ARG_TYPE", "bad arg")),
+				isModuleNotFound(makeError("ERR_INVALID_ARG_TYPE", "bad arg")),
 			).toBe(false);
-			expect(_isModuleNotFound(new Error("plain error w/o code"))).toBe(false);
+			expect(isModuleNotFound(new Error("plain error w/o code"))).toBe(false);
 		});
 
 		it("rejects non-error inputs (null / undefined / string / number)", () => {
-			expect(_isModuleNotFound(null)).toBe(false);
-			expect(_isModuleNotFound(undefined)).toBe(false);
-			expect(_isModuleNotFound("ERR_MODULE_NOT_FOUND")).toBe(false);
-			expect(_isModuleNotFound(42)).toBe(false);
-			expect(_isModuleNotFound({})).toBe(false);
+			expect(isModuleNotFound(null)).toBe(false);
+			expect(isModuleNotFound(undefined)).toBe(false);
+			expect(isModuleNotFound("ERR_MODULE_NOT_FOUND")).toBe(false);
+			expect(isModuleNotFound(42)).toBe(false);
+			expect(isModuleNotFound({})).toBe(false);
 		});
 	});
 

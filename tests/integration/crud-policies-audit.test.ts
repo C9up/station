@@ -10,7 +10,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	_resetStationProviderFlags,
+	resetStationProviderFlags,
 	type StationAppContext,
 } from "../../src/StationProvider.js";
 import type { AuditEvent } from "../../src/types.js";
@@ -326,7 +326,7 @@ function findRoute(
 // ─── Tests ──────────────────────────────────────────────────
 
 describe("station > 54.3 create/edit/destroy CRUD", () => {
-	beforeEach(() => _resetStationProviderFlags());
+	beforeEach(() => resetStationProviderFlags());
 
 	it("POST /admin/users creates a row and redirects to its show page", async () => {
 		const { db } = buildFakeDb();
@@ -393,7 +393,7 @@ describe("station > 54.3 create/edit/destroy CRUD", () => {
 });
 
 describe("station > 56.5 permission gate (Warden unified layer)", () => {
-	beforeEach(() => _resetStationProviderFlags());
+	beforeEach(() => resetStationProviderFlags());
 
 	it("authenticated user WITHOUT the `users.create` permission → 403 (fail-closed, auth wired but no grant)", async () => {
 		const { db } = buildFakeDb();
@@ -510,7 +510,7 @@ describe("station > 56.5 permission gate (Warden unified layer)", () => {
 });
 
 describe("station > security hardening", () => {
-	beforeEach(() => _resetStationProviderFlags());
+	beforeEach(() => resetStationProviderFlags());
 
 	it("mass-assignment guard: drops body keys that aren't declared @Column properties on create", async () => {
 		const { db, rows } = buildFakeDb();
@@ -636,7 +636,7 @@ describe("station > security hardening", () => {
 });
 
 describe("station > 54.6 audit trail", () => {
-	beforeEach(() => _resetStationProviderFlags());
+	beforeEach(() => resetStationProviderFlags());
 
 	it("invokes the audit sink AFTER a successful create with after-snapshot + userId", async () => {
 		const { db } = buildFakeDb();

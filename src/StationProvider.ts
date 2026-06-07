@@ -24,7 +24,7 @@ import type {
 	DatabaseConnection,
 } from "@c9up/atlas";
 import { ResourceRegistry } from "./ResourceRegistry.js";
-import { _setStation } from "./services/main.js";
+import { setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
@@ -282,19 +282,19 @@ const DEFAULT_PER_PAGE = 25;
 const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
 /** Process-scoped flags so we warn once per process, not once per request. */
-let _authWarnEmitted = false;
-let _perPageClampWarned = false;
-let _seedPermsWarned = false;
-let _missingAuditWarned = false;
-let _csrfWarnEmitted = false;
+let authWarnEmitted = false;
+let perPageClampWarned = false;
+let seedPermsWarned = false;
+let missingAuditWarned = false;
+let csrfWarnEmitted = false;
 
 /** @internal Reset module-level flags between tests. */
-export function _resetStationProviderFlags(): void {
-	_authWarnEmitted = false;
-	_perPageClampWarned = false;
-	_seedPermsWarned = false;
-	_missingAuditWarned = false;
-	_csrfWarnEmitted = false;
+export function resetStationProviderFlags(): void {
+	authWarnEmitted = false;
+	perPageClampWarned = false;
+	seedPermsWarned = false;
+	missingAuditWarned = false;
+	csrfWarnEmitted = false;
 }
 
 const TIMESTAMP_PROPERTY_KEYS: ReadonlySet<string> = new Set([
@@ -362,8 +362,8 @@ function snapshotEntity(
 	try {
 		return structuredClone(out);
 	} catch (err) {
-		if (!_auditCloneWarnEmitted) {
-			_auditCloneWarnEmitted = true;
+		if (!auditCloneWarnEmitted) {
+			auditCloneWarnEmitted = true;
 			const detail = err instanceof Error ? err.message : String(err);
 			console.warn(
 				`[station] structuredClone failed on an audit snapshot — falling back to shallow copy. A column value isn't structurally cloneable: ${detail}. Snapshot mutations downstream MAY reach the live entity.`,
@@ -372,7 +372,7 @@ function snapshotEntity(
 		return out;
 	}
 }
-let _auditCloneWarnEmitted = false;
+let auditCloneWarnEmitted = false;
 
 export default class StationProvider {
 	#contexts: Map<Resource, ResourceContext> = new Map();
@@ -395,7 +395,7 @@ export default class StationProvider {
 	register(): void {
 		this.app.container.singleton(ResourceRegistry, () => {
 			const registry = new ResourceRegistry();
-			_setStation(registry);
+			setStation(registry);
 			return registry;
 		});
 		this.app.container.singleton("station", () =>
@@ -404,7 +404,7 @@ export default class StationProvider {
 	}
 
 	async boot(): Promise<void> {
-		// Force-resolve so `_setStation` runs even if no preload touches the
+		// Force-resolve so `setStation` runs even if no preload touches the
 		// singleton. Mirrors AuroraProvider.boot().
 		this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
 	}
@@ -507,8 +507,8 @@ export default class StationProvider {
 				// to the legacy open-by-default mode and warn-once below.
 			}
 		}
-		if (!this.#authConfig.requireAuth && !_authWarnEmitted) {
-			_authWarnEmitted = true;
+		if (!this.#authConfig.requireAuth && !authWarnEmitted) {
+			authWarnEmitted = true;
 			console.warn(
 				"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) + Station 54.4 policy gates BEFORE production. See https://ream.dev/modules/station#auth.",
 			);
@@ -586,12 +586,12 @@ export default class StationProvider {
 	 * "missing policy entry" warning is gone with the 54.4 callback table.
 	 */
 	#warnSeedPermissionsOnce(resources: ReadonlyArray<Resource>): void {
-		if (_seedPermsWarned) return;
+		if (seedPermsWarned) return;
 		// Only meaningful once the Warden layer is wired — the dev-preview /
 		// no-warden path leaves the gate open, so there's nothing to seed.
 		if (this.#authManager === undefined) return;
 		if (resources.length === 0) return;
-		_seedPermsWarned = true;
+		seedPermsWarned = true;
 		const example = resources[0];
 		console.warn(
 			`[station] Admin actions are gated behind '<resource>.<action>' permissions resolved through @c9up/warden (e.g. '${example.name}.list', '${example.name}.create'). Seed roles/grants in the Warden rights store (store.defineRole('admin', ['${example.name}.list', '${example.name}.create', ...]) then assignRole) or every admin request will 403. See https://ream.dev/modules/station#authorization.`,
@@ -599,7 +599,7 @@ export default class StationProvider {
 	}
 
 	#warnCsrfGapOnce(resources: ReadonlyArray<Resource>): void {
-		if (_csrfWarnEmitted) return;
+		if (csrfWarnEmitted) return;
 		const writeActions: ReadonlyArray<ResourceAction> = [
 			"create",
 			"edit",
@@ -609,14 +609,14 @@ export default class StationProvider {
 			r.actions.some((a) => writeActions.includes(a)),
 		);
 		if (!writeEnabled) return;
-		_csrfWarnEmitted = true;
+		csrfWarnEmitted = true;
 		console.warn(
 			"[station] Write-enabled resources are mounted but Station does NOT enforce CSRF at the handler level. Wire @c9up/blackhole (csrf: true) or an equivalent middleware in start/kernel.ts BEFORE production — a missing CSRF check on /admin/<resource>/:id POST allows cross-site form submission to mutate rows under any logged-in user's session.",
 		);
 	}
 
 	#warnAuditGapsOnce(resources: ReadonlyArray<Resource>): void {
-		if (_missingAuditWarned) return;
+		if (missingAuditWarned) return;
 		const writeActions: ReadonlyArray<ResourceAction> = [
 			"create",
 			"edit",
@@ -628,7 +628,7 @@ export default class StationProvider {
 				r.actions.some((a) => writeActions.includes(a)),
 		);
 		if (missing.length === 0) return;
-		_missingAuditWarned = true;
+		missingAuditWarned = true;
 		console.warn(
 			`[station] No audit sink configured for write-enabled resources: ${missing.map((r) => r.name).join(", ")}. Pass 'audit:' in defineResource() to persist mutations to your audit log.`,
 		);
@@ -665,8 +665,8 @@ export default class StationProvider {
 			const page = clampPositiveInt(qs.page, 1);
 			const perPageRaw = clampPositiveInt(qs.perPage, DEFAULT_PER_PAGE);
 			const perPage = Math.min(perPageRaw, MAX_PER_PAGE);
-			if (perPage < perPageRaw && !_perPageClampWarned) {
-				_perPageClampWarned = true;
+			if (perPage < perPageRaw && !perPageClampWarned) {
+				perPageClampWarned = true;
 				console.warn(
 					`[station] perPage clamped to ${MAX_PER_PAGE} (got ${perPageRaw}). Suppressing further warnings.`,
 				);
@@ -1227,15 +1227,11 @@ function clampPositiveInt(raw: string | undefined, fallback: number): number {
 
 /**
  * Node's ERR_MODULE_NOT_FOUND surfaces on an Error subclass with `code`.
- * Exported (with `_internal` prefix) for the 54.8 agnostic-peer-missing
- * unit test which can't realistically simulate the dynamic-import
- * failure path inside vitest's mock graph.
+ * Exported for the 54.8 agnostic-peer-missing unit test, which can't
+ * realistically simulate the dynamic-import failure path inside vitest's
+ * mock graph.
  */
-export function _isModuleNotFound(err: unknown): boolean {
-	return isModuleNotFound(err);
-}
-
-function isModuleNotFound(err: unknown): boolean {
+export function isModuleNotFound(err: unknown): boolean {
 	if (err === null || typeof err !== "object" || !("code" in err)) return false;
 	const { code } = err;
 	return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND";

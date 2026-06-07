@@ -3,10 +3,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	_resetStationProviderFlags,
+	resetStationProviderFlags,
 	type StationAppContext,
 } from "../../src/StationProvider.js";
-import { _getStation } from "../../src/services/main.js";
+import { getStation } from "../../src/services/main.js";
 import { User } from "../fixtures/User.js";
 
 /**
@@ -54,7 +54,7 @@ function makeApp(): {
 
 describe("station > StationProvider > lifecycle", () => {
 	beforeEach(() => {
-		_resetStationProviderFlags();
+		resetStationProviderFlags();
 	});
 
 	it("register() binds ResourceRegistry + 'station' alias, both pointing at the same singleton", () => {
@@ -68,13 +68,13 @@ describe("station > StationProvider > lifecycle", () => {
 		expect(byAlias).toBe(byClass);
 	});
 
-	it("register() wires _setStation so `services/main` resolves the same instance after boot()", async () => {
+	it("register() wires setStation so `services/main` resolves the same instance after boot()", async () => {
 		const { app } = makeApp();
 		const provider = new StationProvider(app);
 		provider.register();
 		await provider.boot();
 		const direct = app.container.resolve<ResourceRegistry>(ResourceRegistry);
-		expect(_getStation()).toBe(direct);
+		expect(getStation()).toBe(direct);
 	});
 
 	it("boot() force-resolves the registry exactly once even if nothing else touches it", async () => {
