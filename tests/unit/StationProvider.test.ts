@@ -1,8 +1,10 @@
 import "reflect-metadata";
+import type { ColumnMetadata } from "@c9up/atlas";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
+	filterWritableBody,
 	resetStationProviderFlags,
 	type StationAppContext,
 } from "../../src/StationProvider.js";
@@ -143,5 +145,29 @@ describe("station > StationProvider > lifecycle", () => {
 		} finally {
 			warnSpy.mockRestore();
 		}
+	});
+});
+
+// Audit 2026-06-13: an unchecked checkbox submits nothing, so a boolean column
+// could never be cleared to false on edit, and a checked box stored the raw "1".
+describe("station > filterWritableBody — checkbox/boolean coercion", () => {
+	const columns: ColumnMetadata[] = [
+		{ propertyKey: "name", type: "string" },
+		{ propertyKey: "active", type: "boolean" },
+	];
+
+	it("clears a boolean to false when the checkbox is unchecked (absent from body)", () => {
+		const out = filterWritableBody({ name: "x" }, columns, "id", new Set());
+		expect(out).toEqual({ name: "x", active: false });
+	});
+
+	it("coerces a checked checkbox ('1') to a real boolean true", () => {
+		const out = filterWritableBody(
+			{ name: "x", active: "1" },
+			columns,
+			"id",
+			new Set(),
+		);
+		expect(out).toEqual({ name: "x", active: true });
 	});
 });

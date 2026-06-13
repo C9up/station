@@ -22,6 +22,7 @@ import type {
 	BaseRepository as AtlasBaseRepository,
 	ColumnMetadata,
 	DatabaseConnection,
+	DateColumnConfig,
 } from "@c9up/atlas";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { setStation } from "./services/main.js";
@@ -158,6 +159,13 @@ interface ResourceContext {
 	repo: StationRepository;
 	columns: ReadonlyArray<ColumnMetadata>;
 	pkColumn: string;
+	/**
+	 * Property keys of framework-managed timestamp columns — those declared
+	 * `@column.dateTime({ autoCreate })` / `{ autoUpdate }` (Lucid-style flag,
+	 * NOT a name convention). BaseRepository owns these on INSERT/UPDATE, so
+	 * the mass-assignment guard drops them regardless of their column name.
+	 */
+	autoManaged: ReadonlySet<string>;
 }
 
 /** Lazy-imported `@c9up/atlas` value surface. */
@@ -165,6 +173,7 @@ interface AtlasModule {
 	BaseRepository: typeof AtlasBaseRepository;
 	getColumnMetadata: (entity: unknown) => ReadonlyArray<ColumnMetadata>;
 	getPrimaryKey: (entity: unknown) => string | undefined;
+	getDateColumnConfig: (entity: unknown) => Record<string, DateColumnConfig>;
 }
 
 /**
@@ -261,8 +270,8 @@ export interface StationConfig {
 	requireAuth?: boolean;
 	/**
 	 * Role required to pass the auth gate. When omitted, any
-	 * authenticated user can access `/admin/*` (the policy gates in
-	 * 54.4 still apply per-action).
+	 * authenticated user can access `/admin/*` (the per-action
+	 * `<resource>.<action>` permission gate still applies).
 	 */
 	requireRole?: string;
 	/**
@@ -312,8 +321,14 @@ const TIMESTAMP_COLUMN_NAMES: ReadonlySet<string> = new Set([
  * Mass-assignment guard. Only accepts keys that are:
  *   1. A declared `@Column` propertyKey on the resource entity, AND
  *   2. Not the primary key (DB-managed), AND
- *   3. Not a framework timestamp (created_at / updated_at / deleted_at —
- *      hook-managed).
+ *   3. Not a framework-managed timestamp. Two signals, both honoured:
+ *      (a) the Lucid-style auto flag — `@column.dateTime({ autoCreate })` /
+ *          `{ autoUpdate }` (passed in via `autoManaged`); this is the
+ *          authoritative one and catches custom-named timestamp columns
+ *          (e.g. `registeredAt`) the name list below would miss, AND
+ *      (b) the conventional name fallback (created_at / updated_at /
+ *          deleted_at) for plain `@Column` timestamps declared without the
+ *          auto flag.
  *
  * The `_method` synthetic field from browser-form method-overrides is
  * dropped automatically because it never matches a column propertyKey.
@@ -321,25 +336,45 @@ const TIMESTAMP_COLUMN_NAMES: ReadonlySet<string> = new Set([
  * Returning a fresh object — never the caller's reference — so a
  * downstream mutation can't poison the audit snapshot.
  */
-function filterWritableBody(
+/** @internal Exported for unit tests — the mass-assignment + checkbox coercion guard. */
+export function filterWritableBody(
 	body: Record<string, unknown>,
 	columns: ReadonlyArray<ColumnMetadata>,
 	pkColumn: string,
+	autoManaged: ReadonlySet<string>,
 ): Record<string, unknown> {
 	const writable: Record<string, unknown> = {};
 	const validKeys = new Set<string>();
+	const booleanKeys = new Set<string>();
 	for (const c of columns) {
 		if (c.propertyKey === pkColumn) continue;
+		if (autoManaged.has(c.propertyKey)) continue;
 		if (TIMESTAMP_PROPERTY_KEYS.has(c.propertyKey)) continue;
 		const snake = c.propertyKey.replace(/([A-Z])/g, "_$1").toLowerCase();
 		if (TIMESTAMP_COLUMN_NAMES.has(snake)) continue;
 		validKeys.add(c.propertyKey);
+		if ((c.type ?? "").toString().toLowerCase() === "boolean") {
+			booleanKeys.add(c.propertyKey);
+		}
+	}
+	// Boolean columns render as checkboxes: an unchecked box submits NOTHING, so
+	// derive every boolean from presence/value. Otherwise an unchecked box can
+	// never clear a previously-true column on edit, and a checked box would store
+	// the raw string "1" instead of a real boolean.
+	for (const key of booleanKeys) {
+		writable[key] = isCheckedValue(body[key]);
 	}
 	for (const [key, value] of Object.entries(body)) {
 		if (!validKeys.has(key)) continue;
+		if (booleanKeys.has(key)) continue; // already derived above
 		writable[key] = value;
 	}
 	return writable;
+}
+
+/** A checkbox/boolean field is true only for its checked submissions. */
+function isCheckedValue(value: unknown): boolean {
+	return value === true || value === "1" || value === "on" || value === "true";
 }
 
 /**
@@ -362,11 +397,23 @@ function snapshotEntity(
 	try {
 		return structuredClone(out);
 	} catch (err) {
+		// structuredClone rejected a value (a function, a class instance with a
+		// non-cloneable field, …). Try a JSON deep-clone next, so the before/
+		// after audit snapshots still don't share mutable references with the
+		// live entity — a shared-ref shallow copy would let a later `setProp`
+		// mutation bleed back into the "before" image. Only if JSON also fails
+		// (bigint, circular) do we accept the shallow copy + warn.
+		try {
+			const cloned: unknown = JSON.parse(JSON.stringify(out));
+			if (isPlainRecord(cloned)) return cloned;
+		} catch {
+			// fall through to the warned shallow copy
+		}
 		if (!auditCloneWarnEmitted) {
 			auditCloneWarnEmitted = true;
 			const detail = err instanceof Error ? err.message : String(err);
 			console.warn(
-				`[station] structuredClone failed on an audit snapshot — falling back to shallow copy. A column value isn't structurally cloneable: ${detail}. Snapshot mutations downstream MAY reach the live entity.`,
+				`[station] structuredClone failed on an audit snapshot and the JSON fallback did not apply — using a shallow copy. A column value isn't cloneable: ${detail}. Snapshot mutations downstream MAY reach the live entity.`,
 			);
 		}
 		return out;
@@ -502,15 +549,25 @@ export default class StationProvider {
 					loginPath: userConfig.loginPath ?? "/admin/login",
 					cookieName: userConfig.cookieName ?? "station_auth",
 				};
-			} catch {
-				// Container has no `auth` binding → warden not wired. Fall through
-				// to the legacy open-by-default mode and warn-once below.
+			} catch (cause) {
+				// Container has no working `auth` binding → warden not wired.
+				// If the host EXPLICITLY opted in (`requireAuth: true`), that is a
+				// misconfiguration, not the dev-preview path — fail closed rather
+				// than silently mounting an unauthenticated admin. When
+				// `requireAuth` was merely defaulted (undefined), fall through to
+				// the open-by-default mode and warn-once below.
+				if (userConfig.requireAuth === true) {
+					throw new Error(
+						"[station] `station.requireAuth: true` is set but no working `auth` binding is registered (wire @c9up/warden's WardenProvider). Refusing to mount an unauthenticated admin.",
+						{ cause },
+					);
+				}
 			}
 		}
 		if (!this.#authConfig.requireAuth && !authWarnEmitted) {
 			authWarnEmitted = true;
 			console.warn(
-				"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) + Station 54.4 policy gates BEFORE production. See https://ream.dev/modules/station#auth.",
+				"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action `<resource>.<action>` permissions in the Warden rights store BEFORE production. See https://ream.dev/modules/station#auth.",
 			);
 		}
 	}
@@ -533,6 +590,16 @@ export default class StationProvider {
 			handler: (ctx: StationHttpContext) => Promise<void>,
 		): ((ctx: StationHttpContext) => Promise<void>) =>
 			this.#authConfig.requireAuth ? this.#withAuth(handler) : handler;
+
+		// `/admin` index — send the operator to the first listable resource (or the
+		// login surface). Without it, the post-login redirect("/admin") lands on a 404.
+		router.get(
+			"/admin",
+			gate(async (ctx) => {
+				const home = resources.find((r) => r.actions.includes("list"));
+				ctx.response.redirect(home ? `/admin/${home.name}` : "/admin/login");
+			}),
+		);
 
 		for (const resource of resources) {
 			const slug = resource.name;
@@ -708,16 +775,19 @@ export default class StationProvider {
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
 			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			// Authorize BEFORE the existence check so an unauthorized caller
+			// can't distinguish 404 (absent) from 403 (exists) — no row-existence
+			// oracle for a user without `<resource>.show`.
+			if (!(await authorizeAction(resource, "show", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
 				ctx.response.send(renderNotFoundPage({ resource, id }));
-				return;
-			}
-			if (!(await authorizeAction(resource, "show", ctx, this.#authManager))) {
-				deny(ctx);
 				return;
 			}
 			const html = renderShowPage({
@@ -757,7 +827,8 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			const { repo, pkColumn, columns, autoManaged } =
+				this.#requireContext(resource);
 			if (
 				!(await authorizeAction(resource, "create", ctx, this.#authManager))
 			) {
@@ -771,7 +842,7 @@ export default class StationProvider {
 			// resource that doesn't declare those columns has the keys
 			// silently dropped here. PK + framework timestamps are always
 			// excluded — they're decided by the DB / hooks, not the caller.
-			const filtered = filterWritableBody(body, columns, pkColumn);
+			const filtered = filterWritableBody(body, columns, pkColumn, autoManaged);
 			const created = await repo.create(filtered);
 			await emitAudit(resource, {
 				action: "create",
@@ -790,16 +861,17 @@ export default class StationProvider {
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
 			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			// Authorize before the existence check (no 404-vs-403 oracle).
+			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
 				ctx.response.send(renderNotFoundPage({ resource, id }));
-				return;
-			}
-			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
-				deny(ctx);
 				return;
 			}
 			const html = renderFormPage({
@@ -818,17 +890,19 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			const { repo, pkColumn, columns, autoManaged } =
+				this.#requireContext(resource);
+			// Authorize before the existence check (no 404-vs-403 oracle).
+			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
+				deny(ctx);
+				return;
+			}
 			const id = ctx.params.id ?? "";
 			const entity = await repo.find(id);
 			if (entity === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
 				ctx.response.send(renderNotFoundPage({ resource, id }));
-				return;
-			}
-			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
-				deny(ctx);
 				return;
 			}
 			const body = await readBody(ctx);
@@ -842,7 +916,7 @@ export default class StationProvider {
 			// deleted_at). An attacker who POSTs `{ role: "admin" }` to
 			// a resource without that column has the field silently
 			// dropped instead of overwriting the entity.
-			const writable = filterWritableBody(body, columns, pkColumn);
+			const writable = filterWritableBody(body, columns, pkColumn, autoManaged);
 			for (const [key, value] of Object.entries(writable)) {
 				entity.setProp(key, value);
 			}
@@ -895,18 +969,19 @@ export default class StationProvider {
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
 			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			// Authorize before the existence check (no 404-vs-403 oracle).
+			if (
+				!(await authorizeAction(resource, "destroy", ctx, this.#authManager))
+			) {
+				deny(ctx);
+				return;
+			}
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
 				ctx.response.send(renderNotFoundPage({ resource, id }));
-				return;
-			}
-			if (
-				!(await authorizeAction(resource, "destroy", ctx, this.#authManager))
-			) {
-				deny(ctx);
 				return;
 			}
 			const before = snapshotEntity(row, columns);
@@ -1017,6 +1092,11 @@ export default class StationProvider {
 			}
 			const result = await manager.verify(token);
 			if (!result.authenticated || result.user === undefined) {
+				// Clear the stale cookie regardless of response shape, so neither
+				// a browser refresh nor an XHR caller retries with the dead token.
+				ctx.response.clearCookie?.(this.#authConfig.cookieName, {
+					path: "/",
+				});
 				if (this.#wantsJsonResponse(ctx)) {
 					ctx.response.status(401);
 					ctx.response.json({
@@ -1024,11 +1104,6 @@ export default class StationProvider {
 					});
 					return;
 				}
-				// Clear stale cookie so the browser doesn't retry with the
-				// same dead token on every refresh.
-				ctx.response.clearCookie?.(this.#authConfig.cookieName, {
-					path: "/",
-				});
 				ctx.response.redirect(this.#authConfig.loginPath);
 				return;
 			}
@@ -1043,19 +1118,30 @@ export default class StationProvider {
 				? rawRoles.filter((r): r is string => typeof r === "string")
 				: [];
 			const required = this.#authConfig.requireRole;
-			if (
-				required !== undefined &&
-				!(await manager.hasRole(user, required, "global"))
-			) {
-				if (this.#wantsJsonResponse(ctx)) {
+			if (required !== undefined) {
+				let roleOk: boolean;
+				try {
+					// `=== true`: a non-boolean resolution must not pass. A throw
+					// (rights-store outage) denies rather than 500-ing.
+					roleOk = (await manager.hasRole(user, required, "global")) === true;
+				} catch (err) {
+					const detail = err instanceof Error ? err.message : String(err);
+					console.error(
+						`[station] role check threw for '${required}' — denying (fail-closed): ${detail}`,
+					);
+					roleOk = false;
+				}
+				if (!roleOk) {
+					if (this.#wantsJsonResponse(ctx)) {
+						ctx.response.status(403);
+						ctx.response.json({ error: "insufficient role" });
+						return;
+					}
 					ctx.response.status(403);
-					ctx.response.json({ error: "insufficient role" });
+					ctx.response.type("text/plain; charset=utf-8");
+					ctx.response.send("Forbidden");
 					return;
 				}
-				ctx.response.status(403);
-				ctx.response.type("text/plain; charset=utf-8");
-				ctx.response.send("Forbidden");
-				return;
 			}
 			const existingAuth = ctx.auth ?? {};
 			ctx.auth = {
@@ -1193,8 +1279,23 @@ function buildResourceContext(
 		new atlas.BaseRepository(entityCtor, conn),
 	);
 	const columns = atlas.getColumnMetadata(resource.entity);
-	const pkColumn = atlas.getPrimaryKey(resource.entity) ?? "id";
-	return { repo, columns, pkColumn };
+	const pkColumn = atlas.getPrimaryKey(resource.entity);
+	if (pkColumn === undefined) {
+		// Refusing to fall back to "id": a silently-wrong PK would leave the
+		// REAL primary key out of the mass-assignment exclusion (client could
+		// overwrite it) and mis-key the audit `recordId` + the post-write
+		// redirect. Surface the metadata gap loud at boot instead.
+		throw new Error(
+			`[station] Could not resolve a primary key for ${resource.entity.name}. Declare an @PrimaryKey() column on the entity so atlas can report it.`,
+		);
+	}
+	const dateColumns = atlas.getDateColumnConfig(resource.entity);
+	const autoManaged = new Set<string>(
+		Object.entries(dateColumns)
+			.filter(([, cfg]) => cfg.autoCreate === true || cfg.autoUpdate === true)
+			.map(([prop]) => prop),
+	);
+	return { repo, columns, pkColumn, autoManaged };
 }
 
 /**
@@ -1277,8 +1378,30 @@ async function authorizeAction(
 ): Promise<boolean> {
 	if (authManager === undefined) return true;
 	const user = ctx.auth?.user;
-	if (user === undefined) return false;
-	return authManager.hasPermission(user, `${resource.name}.${action}`, scope);
+	// `=== undefined` alone is too narrow: a host whose middleware writes
+	// `ctx.auth = { user: null }` as a logged-out sentinel must still be
+	// denied. Fail closed on any nullish user.
+	if (user === undefined || user === null) return false;
+	try {
+		// Coerce to a strict boolean: the duck-typed manager could resolve a
+		// truthy non-boolean, and `!truthy` would silently ALLOW. Anything
+		// not exactly `true` denies (fail-closed).
+		return (
+			(await authManager.hasPermission(
+				user,
+				`${resource.name}.${action}`,
+				scope,
+			)) === true
+		);
+	} catch (err) {
+		// A rights-store I/O failure (DB/Redis-backed resolver) must not pass
+		// the gate. Deny and surface it loud rather than 500-ing or allowing.
+		const detail = err instanceof Error ? err.message : String(err);
+		console.error(
+			`[station] authorization check threw for '${resource.name}.${action}' — denying (fail-closed): ${detail}`,
+		);
+		return false;
+	}
 }
 
 function deny(ctx: StationHttpContext): void {
@@ -1289,13 +1412,39 @@ function deny(ctx: StationHttpContext): void {
 	);
 }
 
+/**
+ * Memoise the parsed body per request (Adonis BodyParser semantics — the
+ * body is parsed once and stays re-readable). `#buildMethodOverrideHandler`
+ * reads it to inspect `_method`, then delegates to the update/destroy
+ * handler which reads it again; without this, a single-shot
+ * `ctx.request.body()` would return `{}` on the second read and the edit
+ * would silently no-op.
+ */
+const parsedBodyCache = new WeakMap<
+	StationHttpContext,
+	Record<string, unknown>
+>();
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
 async function readBody(
+	ctx: StationHttpContext,
+): Promise<Record<string, unknown>> {
+	const cached = parsedBodyCache.get(ctx);
+	if (cached !== undefined) return cached;
+	const parsed = await parseBody(ctx);
+	parsedBodyCache.set(ctx, parsed);
+	return parsed;
+}
+
+async function parseBody(
 	ctx: StationHttpContext,
 ): Promise<Record<string, unknown>> {
 	if (typeof ctx.request.body !== "function") return {};
 	const raw = await ctx.request.body();
-	if (raw === null || typeof raw !== "object" || Array.isArray(raw)) return {};
-	return raw as Record<string, unknown>;
+	return isPlainRecord(raw) ? raw : {};
 }
 
 /**

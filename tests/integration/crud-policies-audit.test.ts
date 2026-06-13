@@ -340,6 +340,18 @@ describe("station > 54.3 create/edit/destroy CRUD", () => {
 		expect(res.location).toMatch(/^\/admin\/users\/\d+$/);
 	});
 
+	// Audit 2026-06-13: login + already-authenticated both redirect("/admin"),
+	// which was never mounted → 404. The index must exist and land somewhere real.
+	it("GET /admin redirects to the first listable resource", async () => {
+		const { db } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const index = findRoute(routes, "get", "/admin");
+		const { ctx, res } = buildCtx({});
+		await index.handler(ctx);
+		expect(res.status).toBe(302);
+		expect(res.location).toBe("/admin/users");
+	});
+
 	it("GET /admin/users/new renders the create form", async () => {
 		const { db } = buildFakeDb();
 		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
