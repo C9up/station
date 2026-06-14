@@ -1476,7 +1476,22 @@ function redirectToShow(
 ): void {
 	const slug = encodeURIComponent(resource.name);
 	const safeId = encodeURIComponent(String(id ?? ""));
-	ctx.response.redirect(`/admin/${slug}/${safeId}`);
+	// defineResource allows action subsets (e.g. [list, create, edit]), so the
+	// show route may not be mounted. Redirect to the most specific ENABLED view
+	// instead of blindly hitting show and 404-ing: show → edit → list → index.
+	if (resource.actions.includes("show")) {
+		ctx.response.redirect(`/admin/${slug}/${safeId}`);
+		return;
+	}
+	if (resource.actions.includes("edit")) {
+		ctx.response.redirect(`/admin/${slug}/${safeId}/edit`);
+		return;
+	}
+	if (resource.actions.includes("list")) {
+		ctx.response.redirect(`/admin/${slug}`);
+		return;
+	}
+	ctx.response.redirect("/admin");
 }
 
 /**

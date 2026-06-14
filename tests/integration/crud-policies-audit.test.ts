@@ -340,6 +340,22 @@ describe("station > 54.3 create/edit/destroy CRUD", () => {
 		expect(res.location).toMatch(/^\/admin\/users\/\d+$/);
 	});
 
+	// Audit 2026-06-13: redirectToShow fired unconditionally after a write, but
+	// the show route is only mounted when actions includes "show" — a subset
+	// like [list, create] 404'd on the post-create redirect.
+	it("POST create redirects to list (not show) when show is disabled", async () => {
+		const { db } = buildFakeDb();
+		const { routes } = await bootStation({
+			db,
+			resources: [{ entity: User, actions: ["list", "create"] }],
+		});
+		const create = findRoute(routes, "post", "/admin/users");
+		const { ctx, res } = buildCtx({ body: { name: "Bob", age: 22 } });
+		await create.handler(ctx);
+		expect(res.status).toBe(302);
+		expect(res.location).toBe("/admin/users");
+	});
+
 	// Audit 2026-06-13: login + already-authenticated both redirect("/admin"),
 	// which was never mounted → 404. The index must exist and land somewhere real.
 	it("GET /admin redirects to the first listable resource", async () => {
