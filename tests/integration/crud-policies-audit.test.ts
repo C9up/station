@@ -441,6 +441,52 @@ describe("station > 56.5 permission gate (Warden unified layer)", () => {
 		expect(res.body).toContain("403");
 	});
 
+	it("per-action denial returns a JSON 403 to a JSON/XHR caller (content negotiation)", async () => {
+		const { db } = buildFakeDb();
+		const auth = buildFakeAuth({ permissions: [] });
+		const { routes } = await bootStation({
+			db,
+			auth,
+			resources: [{ entity: User }],
+		});
+		const create = findRoute(routes, "post", "/admin/users");
+		const { ctx, res } = buildCtx({
+			body: { name: "X", age: 1 },
+			cookies: { station_auth: "TOKEN_OK" },
+			headers: { accept: "application/json" },
+		});
+		await create.handler(ctx);
+		expect(res.status).toBe(403);
+		// deny() used to always send text/html, inconsistent with the gate's
+		// content negotiation (audit 2026-06-13).
+		expect(res.contentType).toBe("application/json");
+		expect(JSON.parse(res.body ?? "{}")).toMatchObject({ error: "Forbidden" });
+	});
+
+	it("a strategy crash surfaces 503, not a redirect-to-login (strategyCrash wired)", async () => {
+		const { db } = buildFakeDb();
+		const auth = {
+			authenticate: async () => ({ authenticated: false }),
+			verify: async () => ({ authenticated: false, strategyCrash: true }),
+			hasPermission: async () => true,
+			hasRole: async () => true,
+		};
+		const { routes } = await bootStation({
+			db,
+			auth,
+			resources: [{ entity: User }],
+		});
+		const create = findRoute(routes, "post", "/admin/users");
+		const { ctx, res } = buildCtx({
+			body: { name: "X", age: 1 },
+			cookies: { station_auth: "TOKEN_OK" },
+		});
+		await create.handler(ctx);
+		// Pre-fix: strategyCrash was ignored → treated as an expired session
+		// (clear cookie + 302 redirect to login). It's a server fault → 503.
+		expect(res.status).toBe(503);
+	});
+
 	it("grants `users.create` but not `users.destroy` → create passes (302), destroy 403s (per-action granularity)", async () => {
 		const { db, rows } = buildFakeDb();
 		rows.set(7, { id: 7, name: "X", age: 1 });

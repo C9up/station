@@ -1042,15 +1042,7 @@ export default class StationProvider {
 	 * 302 to the login page.
 	 */
 	#wantsJsonResponse(ctx: StationHttpContext): boolean {
-		const accept = ctx.request.header?.("accept");
-		if (typeof accept === "string" && accept.includes("application/json")) {
-			return true;
-		}
-		const xrw = ctx.request.header?.("x-requested-with");
-		if (typeof xrw === "string" && xrw.toLowerCase() === "xmlhttprequest") {
-			return true;
-		}
-		return false;
+		return wantsJsonResponse(ctx);
 	}
 
 	/**
@@ -1092,6 +1084,22 @@ export default class StationProvider {
 			}
 			const result = await manager.verify(token);
 			if (!result.authenticated || result.user === undefined) {
+				// A strategy CRASH (the auth backend threw) is a server fault, not a
+				// failed/expired login — don't clear the cookie or bounce to /login
+				// as if the session died. Surface 503 so the real error isn't masked
+				// as a routine re-login (audit 2026-06-13).
+				if (result.strategyCrash) {
+					ctx.response.status(503);
+					if (this.#wantsJsonResponse(ctx)) {
+						ctx.response.json({ error: "authentication service unavailable" });
+					} else {
+						ctx.response.type("text/html; charset=utf-8");
+						ctx.response.send(
+							"<h1>503 Service Unavailable</h1><p>Authentication is temporarily unavailable. Please try again.</p>",
+						);
+					}
+					return;
+				}
 				// Clear the stale cookie regardless of response shape, so neither
 				// a browser refresh nor an XHR caller retries with the dead token.
 				ctx.response.clearCookie?.(this.#authConfig.cookieName, {
@@ -1404,8 +1412,30 @@ async function authorizeAction(
 	}
 }
 
+/** Content-negotiation: JSON for `Accept: application/json` or an XHR, else HTML. */
+function wantsJsonResponse(ctx: StationHttpContext): boolean {
+	const accept = ctx.request.header?.("accept");
+	if (typeof accept === "string" && accept.includes("application/json")) {
+		return true;
+	}
+	const xrw = ctx.request.header?.("x-requested-with");
+	if (typeof xrw === "string" && xrw.toLowerCase() === "xmlhttprequest") {
+		return true;
+	}
+	return false;
+}
+
 function deny(ctx: StationHttpContext): void {
 	ctx.response.status(403);
+	// Match the auth gate's content negotiation — a JSON / XHR caller used to get
+	// an HTML 403 body here, inconsistent with the gate (audit 2026-06-13).
+	if (wantsJsonResponse(ctx)) {
+		ctx.response.json({
+			error: "Forbidden",
+			message: "Your account does not have access to this resource action.",
+		});
+		return;
+	}
 	ctx.response.type("text/html; charset=utf-8");
 	ctx.response.send(
 		"<h1>403 Forbidden</h1><p>Your account does not have access to this resource action.</p>",
