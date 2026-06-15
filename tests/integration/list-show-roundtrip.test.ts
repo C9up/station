@@ -160,10 +160,13 @@ function buildSeededDb(userCount: number) {
 	};
 }
 
-function buildApp(db: unknown): StationAppContext {
+function buildApp(db: unknown, router: unknown): StationAppContext {
 	const bindings = new Map<unknown, () => unknown>();
 	const cache = new Map<unknown, unknown>();
 	bindings.set("db", () => db);
+	// The provider resolves the host router from the container under the
+	// `'router'` token (as Ignitor registers it) — NOT via a `@c9up/ream` import.
+	bindings.set("router", () => router);
 	const app: StationAppContext = {
 		container: {
 			singleton(token, factory) {
@@ -176,6 +179,9 @@ function buildApp(db: unknown): StationAppContext {
 				const value = factory();
 				cache.set(token, value);
 				return bypassTypeCheck<T>(value);
+			},
+			has(token: unknown): boolean {
+				return cache.has(token) || bindings.has(token);
 			},
 		},
 		config: {
@@ -195,10 +201,6 @@ async function bootStation(opts: {
 	db: unknown;
 	resources: ReadonlyArray<Parameters<typeof defineResource>[0]>;
 }): Promise<{ routes: CapturedRoute[] }> {
-	const routerMod = bypassTypeCheck<{ setRouter: (router: unknown) => void }>(
-		await import("@c9up/ream/services/router"),
-	);
-	const { setRouter } = routerMod;
 	const routes: CapturedRoute[] = [];
 	const captureFactory =
 		(method: CapturedRoute["method"]) =>
@@ -215,12 +217,9 @@ async function bootStation(opts: {
 		put: captureFactory("put"),
 		delete: captureFactory("delete"),
 	};
-	// setRouter expects a `Router` shape; the fake satisfies the four
-	// verbs StationProvider.start() reaches for (get/post/put/delete).
-	// Routed through bypass-type-check to honour AC15's no-`as` rule.
-	setRouter(bypassTypeCheck(fakeRouter));
-
-	const app = buildApp(opts.db);
+	// The fake satisfies the four verbs StationProvider.start() reaches for
+	// (get/post/put/delete); the provider resolves it from the container.
+	const app = buildApp(opts.db, fakeRouter);
 	const provider = new StationProvider(app);
 	provider.register();
 	await provider.boot();

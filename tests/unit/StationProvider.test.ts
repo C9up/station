@@ -16,7 +16,13 @@ import { User } from "../fixtures/User.js";
  * the same duck-typed surface; using a local fake keeps the test free
  * of `@c9up/ream` and lets us assert binding calls directly.
  */
-function makeApp(): {
+/** No-op router fake — satisfies the slice `#registerAdminRoutes` calls. */
+function makeNoopRouter(): unknown {
+	const noop = () => undefined;
+	return { get: noop, post: noop, put: noop, delete: noop };
+}
+
+function makeApp(opts?: { router?: unknown }): {
 	app: StationAppContext;
 	resolved: unknown[];
 	bindings: Map<unknown, () => unknown>;
@@ -24,12 +30,16 @@ function makeApp(): {
 	const bindings = new Map<unknown, () => unknown>();
 	const cache = new Map<unknown, unknown>();
 	const resolved: unknown[] = [];
-	// Stub `db` so phase 2 of `start()` (per-resource context build) finds
-	// a connection. Phase 3 (route registration on the real Ream router
-	// proxy) is what these tests actually exercise — the proxy throws
-	// "Router accessed before initialization" because Ignitor never wired
-	// `setRouter`, and StationProvider must swallow that silently.
+	// Stub `db` so phase 2 of `start()` (per-resource context build) finds a
+	// connection. The provider resolves the host router from the container under
+	// the `'router'` token (as Ignitor registers it) — NOT via a `@c9up/ream`
+	// import. Register one only when the test wants `start()` to proceed past
+	// Phase 1; omit it to exercise the degraded "no router" (non-Ream) path.
 	bindings.set("db", () => ({}));
+	if (opts?.router !== undefined) {
+		const router = opts.router;
+		bindings.set("router", () => router);
+	}
 	const app: StationAppContext = {
 		container: {
 			singleton(token, factory) {
@@ -43,6 +53,9 @@ function makeApp(): {
 				const value = factory();
 				cache.set(token, value);
 				return value as T;
+			},
+			has(token: unknown): boolean {
+				return cache.has(token) || bindings.has(token);
 			},
 		},
 		config: {
@@ -104,7 +117,7 @@ describe("station > StationProvider > lifecycle", () => {
 	});
 
 	it("start() with a registered resource emits the auth warn EXACTLY ONCE across multiple start() calls", async () => {
-		const { app } = makeApp();
+		const { app } = makeApp({ router: makeNoopRouter() });
 		const provider = new StationProvider(app);
 		provider.register();
 		await provider.boot();
@@ -113,10 +126,9 @@ describe("station > StationProvider > lifecycle", () => {
 
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			// Dynamic import of `@c9up/ream/services/router` will fail in the
-			// test environment (no Ream host wired); the try/catch swallows
-			// silently. The warn fires BEFORE the import attempt, so we still
-			// observe it.
+			// A router is registered in the container, so start() proceeds through
+			// Phase 1b (#configureAuth) where the no-auth warn fires. The second
+			// start() short-circuits via the `#started` guard — warn fires once.
 			await provider.start();
 			await provider.start();
 			const warnCalls = warnSpy.mock.calls.filter((call) =>
@@ -128,7 +140,10 @@ describe("station > StationProvider > lifecycle", () => {
 		}
 	});
 
-	it("start() tolerates non-Ream hosts (failed router import → no throw)", async () => {
+	it("start() tolerates non-Ream hosts (no 'router' registered → no throw)", async () => {
+		// No router registered in the container (`makeApp()` omits it) — the
+		// non-Ream / not-wired host shape. #loadPeers returns null and start()
+		// returns silently. Station ships publishable / agnostic.
 		const { app } = makeApp();
 		const provider = new StationProvider(app);
 		provider.register();
@@ -138,9 +153,6 @@ describe("station > StationProvider > lifecycle", () => {
 
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
-			// In the test environment, `@c9up/ream/services/router` import
-			// throws (router proxy is uninitialised). Provider MUST swallow
-			// silently — Station is supposed to ship publishable / agnostic.
 			await expect(provider.start()).resolves.toBeUndefined();
 		} finally {
 			warnSpy.mockRestore();

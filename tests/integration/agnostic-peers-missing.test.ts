@@ -71,6 +71,9 @@ function buildApp(opts: {
 				cache.set(token, value);
 				return bypassTypeCheck<T>(value);
 			},
+			has(token: unknown): boolean {
+				return cache.has(token) || bindings.has(token);
+			},
 		},
 		config: {
 			get<T>(key: string): T | undefined {
@@ -94,40 +97,30 @@ function buildMinimalDb() {
 	};
 }
 
-async function captureRoutes(): Promise<{
-	calls: string[];
-	finish: () => void;
-}> {
+function captureRoutes(app: StationAppContext): { calls: string[] } {
 	const calls: string[] = [];
-	const routerMod = bypassTypeCheck<{
-		setRouter: (router: unknown) => void;
-	}>(await import("@c9up/ream/services/router"));
-	routerMod.setRouter(
-		bypassTypeCheck({
-			get: (p: string) => {
-				calls.push(`GET ${p}`);
-				return {};
-			},
-			post: (p: string) => {
-				calls.push(`POST ${p}`);
-				return {};
-			},
-			put: (p: string) => {
-				calls.push(`PUT ${p}`);
-				return {};
-			},
-			delete: (p: string) => {
-				calls.push(`DELETE ${p}`);
-				return {};
-			},
-		}),
-	);
-	return {
-		calls,
-		finish: () => {
-			/* router stays mounted — vitest resets between tests */
+	const fakeRouter = {
+		get: (p: string) => {
+			calls.push(`GET ${p}`);
+			return {};
+		},
+		post: (p: string) => {
+			calls.push(`POST ${p}`);
+			return {};
+		},
+		put: (p: string) => {
+			calls.push(`PUT ${p}`);
+			return {};
+		},
+		delete: (p: string) => {
+			calls.push(`DELETE ${p}`);
+			return {};
 		},
 	};
+	// The provider resolves the host router from the container under `'router'`
+	// (as Ignitor registers it) — NOT via a `@c9up/ream` import.
+	app.container.singleton("router", () => fakeRouter);
+	return { calls };
 }
 
 describe("station > integration > 54.8 agnostic peer-missing boot", () => {
@@ -184,7 +177,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 					app.container.resolve<ResourceRegistry>(ResourceRegistry);
 				registry.register(defineResource({ entity: User }));
 
-				const { calls } = await captureRoutes();
+				const { calls } = captureRoutes(app);
 				await provider.start();
 
 				// CRUD routes mounted.
@@ -227,7 +220,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 
 			// Reset the recorder to capture only start()'s lookups.
 			resolveCalls = [];
-			const { calls } = await captureRoutes();
+			const { calls } = captureRoutes(app);
 			await provider.start();
 
 			// CRUD mounted.
@@ -252,6 +245,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 						}
 						throw new Error(`not registered: ${String(token)}`);
 					},
+					has: () => false,
 				},
 				config: {
 					get<T>(): T | undefined {
@@ -281,7 +275,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			await provider.boot();
 			// no registry.register() — registry stays empty
 
-			const { calls } = await captureRoutes();
+			const { calls } = captureRoutes(app);
 			await provider.start();
 			expect(calls).toHaveLength(0);
 		});

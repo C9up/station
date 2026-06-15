@@ -43,6 +43,7 @@ import { renderShowPage } from "./views/show.js";
 interface StationContainer {
 	singleton<T>(key: unknown, factory: () => T): void;
 	resolve<T>(key: unknown): T;
+	has(key: unknown): boolean;
 }
 
 interface StationConfigStore {
@@ -513,20 +514,25 @@ export default class StationProvider {
 	}
 
 	/**
-	 * Phase 1 — lazy-import the optional `@c9up/ream/services/router` +
-	 * `@c9up/atlas` peers. Returns null when either is module-not-found (a
-	 * legitimate degraded-host signal); re-throws anything else.
+	 * Phase 1 — resolve the host router from the container (Ream registers it as
+	 * `'router'` in Ignitor) + lazy-import the optional `@c9up/atlas` peer.
+	 *
+	 * Reading the router from the container — instead of importing
+	 * `@c9up/ream/services/router` — keeps station runtime-agnostic: a non-Ream
+	 * host never registers `'router'` → null (a legitimate degraded-host signal).
+	 * `@c9up/atlas` stays a genuine peer MODULE import (it ships agnostic
+	 * classes, not a framework singleton); module-not-found → null, anything
+	 * else re-throws.
 	 */
 	async #loadPeers(): Promise<{
 		router: StationRouter;
 		atlas: AtlasModule;
 	} | null> {
+		if (!this.app.container.has("router")) return null;
+		const router = this.app.container.resolve<StationRouter>("router");
 		try {
-			const routerMod = loadBearingCast<{ default: StationRouter }>(
-				await import("@c9up/ream/services/router"),
-			);
 			const atlas = loadBearingCast<AtlasModule>(await import("@c9up/atlas"));
-			return { router: routerMod.default, atlas };
+			return { router, atlas };
 		} catch (err) {
 			if (isModuleNotFound(err)) return null;
 			throw err;

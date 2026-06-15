@@ -218,6 +218,9 @@ function buildApp(db: unknown, auth?: unknown): StationAppContext {
 				cache.set(token, value);
 				return bypassTypeCheck<T>(value);
 			},
+			has(token: unknown): boolean {
+				return cache.has(token) || bindings.has(token);
+			},
 		},
 		config: {
 			get<T>(_key: string): T | undefined {
@@ -232,9 +235,6 @@ async function bootStation(opts: {
 	resources: ReadonlyArray<Parameters<typeof defineResource>[0]>;
 	auth?: unknown;
 }): Promise<{ routes: CapturedRoute[] }> {
-	const routerMod = bypassTypeCheck<{ setRouter: (router: unknown) => void }>(
-		await import("@c9up/ream/services/router"),
-	);
 	const routes: CapturedRoute[] = [];
 	const captureFactory =
 		(method: CapturedRoute["method"]) =>
@@ -245,15 +245,16 @@ async function bootStation(opts: {
 			routes.push({ method, path, handler });
 			return {};
 		};
-	routerMod.setRouter(
-		bypassTypeCheck({
-			get: captureFactory("get"),
-			post: captureFactory("post"),
-			put: captureFactory("put"),
-			delete: captureFactory("delete"),
-		}),
-	);
+	const fakeRouter = {
+		get: captureFactory("get"),
+		post: captureFactory("post"),
+		put: captureFactory("put"),
+		delete: captureFactory("delete"),
+	};
 	const app = buildApp(opts.db, opts.auth);
+	// The provider resolves the host router from the container under `'router'`
+	// (as Ignitor registers it) — NOT via a `@c9up/ream` import.
+	app.container.singleton("router", () => fakeRouter);
 	const provider = new StationProvider(app);
 	provider.register();
 	await provider.boot();
