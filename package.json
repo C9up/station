@@ -1,6 +1,6 @@
 {
   "name": "@c9up/station",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Station — admin scaffolding for the Ream framework. Declarative resource catalogue (defineResource) backing list/show/create/edit/destroy routes, audit, policies.",
   "license": "MIT",
   "type": "module",
