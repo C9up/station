@@ -82,7 +82,11 @@ function buildEmptyDb() {
 	};
 }
 
-async function bootShowRoute(): Promise<CapturedRoute> {
+async function bootShowRoute(
+	makeRenderer: () => {
+		mount(d: string, dir: string): void;
+	} = makeInkerRenderer,
+): Promise<CapturedRoute> {
 	const routes: CapturedRoute[] = [];
 	const capture =
 		(method: CapturedRoute["method"]) =>
@@ -99,7 +103,7 @@ async function bootShowRoute(): Promise<CapturedRoute> {
 		put: capture("put"),
 		delete: capture("delete"),
 	}));
-	bindings.set("inker", () => makeInkerRenderer());
+	bindings.set("inker", () => makeRenderer());
 	const app: StationAppContext = {
 		container: {
 			singleton(token, factory) {
@@ -137,8 +141,11 @@ async function bootShowRoute(): Promise<CapturedRoute> {
 	return show;
 }
 
-async function render404(id: string): Promise<ResponseRecorder> {
-	const show = await bootShowRoute();
+async function render404(
+	id: string,
+	makeRenderer?: () => { mount(d: string, dir: string): void },
+): Promise<ResponseRecorder> {
+	const show = await bootShowRoute(makeRenderer ?? makeInkerRenderer);
 	const res = new ResponseRecorder();
 	const ctx: HttpContextLike = {
 		request: { qs: () => ({}) },
@@ -177,6 +184,26 @@ describe("station > integration > 57.1 inker-rendered 404", () => {
 		);
 		// The raw payload must NOT appear as executable markup.
 		expect(res.body).not.toContain("<code><script>alert(1)</script></code>");
+		expect(res.body).not.toContain("<script>alert(1)</script>");
+	});
+
+	it("falls back to a static 404 (never a 500) when the inker render itself throws", async () => {
+		// A render fault (missing template on a partial publish, fs error, parse
+		// failure) must not escalate a not-found into a server error. The renderer
+		// mounts fine but rejects at render time.
+		const makeFailing = () => ({
+			mount(): void {},
+			renderToString(): Promise<string> {
+				return Promise.reject(new Error("boom: inker engine unavailable"));
+			},
+		});
+		// The handler must resolve — no exception may escape the not-found branch.
+		const res = await render404("<script>alert(1)</script>", makeFailing);
+		expect(res.status).toBe(404);
+		expect(res.contentType).toBe("text/html; charset=utf-8");
+		expect(res.body).toContain("404 — Not Found");
+		// The request-controlled id is still HTML-escaped in the fallback body.
+		expect(res.body).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
 		expect(res.body).not.toContain("<script>alert(1)</script>");
 	});
 });

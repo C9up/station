@@ -632,13 +632,25 @@ export default class StationProvider {
 			store: new Map<string, unknown>(),
 			locale: "en",
 		};
-		return this.#viewRenderer.renderToString(renderCtx, "station::errors/404", {
-			title: "Not Found",
-			id,
-			label: resource.label,
-			labelLower: resource.label.toLowerCase(),
-			slug: encodeURIComponent(resource.name),
-		});
+		try {
+			return await this.#viewRenderer.renderToString(
+				renderCtx,
+				"station::errors/404",
+				{
+					title: "Not Found",
+					id,
+					label: resource.label,
+					labelLower: resource.label.toLowerCase(),
+					slug: encodeURIComponent(resource.name),
+				},
+			);
+		} catch {
+			// The error page itself failed to render (missing/faulty template,
+			// fs fault, parse error). A not-found must never escalate into a 500:
+			// fall back to a minimal, dependency-free static body. `id` is
+			// request-controlled, so it is HTML-escaped here.
+			return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Not Found</title></head><body><h1>404 — Not Found</h1><p>No ${escapeMin(resource.label)} matches <code>${escapeMin(id)}</code>.</p></body></html>`;
+		}
 	}
 
 	/**
@@ -893,9 +905,10 @@ export default class StationProvider {
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
+				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
+				ctx.response.send(notFoundHtml);
 				return;
 			}
 			const html = renderShowPage({
@@ -977,9 +990,10 @@ export default class StationProvider {
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
+				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
+				ctx.response.send(notFoundHtml);
 				return;
 			}
 			const html = renderFormPage({
@@ -1008,9 +1022,10 @@ export default class StationProvider {
 			const id = ctx.params.id ?? "";
 			const entity = await repo.find(id);
 			if (entity === null) {
+				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
+				ctx.response.send(notFoundHtml);
 				return;
 			}
 			const body = await readBody(ctx);
@@ -1087,9 +1102,10 @@ export default class StationProvider {
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
+				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
+				ctx.response.send(notFoundHtml);
 				return;
 			}
 			const before = snapshotEntity(row, columns);

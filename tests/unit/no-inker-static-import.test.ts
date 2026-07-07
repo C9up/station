@@ -20,10 +20,13 @@
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const SRC_DIR = new URL("../../src/", import.meta.url);
-const SRC_PATH = SRC_DIR.pathname;
+// fileURLToPath (not `.pathname`) so a checkout whose absolute path contains a
+// space or reserved char decodes correctly — mirrors StationProvider's own use.
+const SRC_PATH = fileURLToPath(SRC_DIR);
 
 // Real import of the inker package — static `from "@c9up/inker[/sub]"` or
 // dynamic `import("@c9up/inker[/sub]")`. Comments are stripped first, so prose
