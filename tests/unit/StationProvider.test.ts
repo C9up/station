@@ -9,6 +9,7 @@ import StationProvider, {
 	type StationAppContext,
 } from "../../src/StationProvider.js";
 import { getStation } from "../../src/services/main.js";
+import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
 
 /**
@@ -36,6 +37,10 @@ function makeApp(opts?: { router?: unknown }): {
 	// import. Register one only when the test wants `start()` to proceed past
 	// Phase 1; omit it to exercise the degraded "no router" (non-Ream) path.
 	bindings.set("db", () => ({}));
+	// 57.1 — bind the shared inker renderer (the `"inker"` alias). Harmless for
+	// the empty-registry / non-Ream tests (they return before the view-engine
+	// gate); required once start() proceeds past Phase 1 with a resource + router.
+	bindings.set("inker", () => makeInkerRenderer());
 	if (opts?.router !== undefined) {
 		const router = opts.router;
 		bindings.set("router", () => router);

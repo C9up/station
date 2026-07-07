@@ -20,6 +20,7 @@ import StationProvider, {
 	type StationAppContext,
 } from "../../src/StationProvider.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
+import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
 
 interface CapturedRoute {
@@ -167,6 +168,10 @@ function buildApp(db: unknown, router: unknown): StationAppContext {
 	// The provider resolves the host router from the container under the
 	// `'router'` token (as Ignitor registers it) — NOT via a `@c9up/ream` import.
 	bindings.set("router", () => router);
+	// 57.1 — Station resolves the shared inker renderer via the `"inker"` alias
+	// (AdonisJS package-views pattern) and mounts its `station` disk; a real
+	// Templates-backed stub exercises the mount + `station::` resolution.
+	bindings.set("inker", () => makeInkerRenderer());
 	const app: StationAppContext = {
 		container: {
 			singleton(token, factory) {

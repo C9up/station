@@ -41,6 +41,7 @@ import StationProvider, {
 	type StationConfig,
 } from "../../src/StationProvider.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
+import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
 
 function makeError(code: string, message: string): Error & { code: string } {
@@ -53,11 +54,17 @@ function buildApp(opts: {
 	db?: unknown;
 	auth?: unknown;
 	stationConfig?: StationConfig;
+	// 57.1 — bind the shared inker renderer by default (Station hard-requires a
+	// view engine once an admin surface exists). The inker-missing test opts out.
+	bindInker?: boolean;
 }): StationAppContext {
 	const bindings = new Map<unknown, () => unknown>();
 	const cache = new Map<unknown, unknown>();
 	if (opts.db !== undefined) bindings.set("db", () => opts.db);
 	if (opts.auth !== undefined) bindings.set("auth", () => opts.auth);
+	if (opts.bindInker !== false) {
+		bindings.set("inker", () => makeInkerRenderer());
+	}
 	return {
 		container: {
 			singleton(token, factory) {
@@ -257,6 +264,37 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			await provider.boot();
 			await expect(provider.start()).resolves.toBeUndefined();
 			expect(dbResolved).toBe(false);
+		});
+	});
+
+	describe("inker missing (view engine is a HARD render requirement, D2)", () => {
+		// Story 57.1: unlike warden (absence → open dev-preview), a missing view
+		// engine when an admin surface exists is a misconfiguration. Station
+		// consumes inker via the `"inker"` container alias (AdonisJS package-views
+		// pattern), so "missing" is simply an unbound `"inker"` — driven through
+		// the REAL start() gate with `bindInker: false`.
+		it('resources registered + no `"inker"` bound ⇒ start() throws the register-inker error', async () => {
+			const app = buildApp({ db: buildMinimalDb(), bindInker: false });
+			const provider = new StationProvider(app);
+			provider.register();
+			await provider.boot();
+			app.container
+				.resolve<ResourceRegistry>(ResourceRegistry)
+				.register(defineResource({ entity: User }));
+			captureRoutes(app);
+
+			await expect(provider.start()).rejects.toThrow(/register @c9up\/inker/);
+		});
+
+		it("empty registry ⇒ start() returns early, inker never required", async () => {
+			const app = buildApp({ db: buildMinimalDb(), bindInker: false });
+			const provider = new StationProvider(app);
+			provider.register();
+			await provider.boot();
+			// no registry.register() — zero resources
+			captureRoutes(app);
+
+			await expect(provider.start()).resolves.toBeUndefined();
 		});
 	});
 

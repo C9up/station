@@ -1,0 +1,4 @@
+{% layout 'station::layout' %}
+<h1>404 Not Found</h1>
+<p>No {{ labelLower }} with ID <code>{{ id }}</code>.</p>
+<a class="st-backlink" href="/admin/{{ slug }}">← Back to {{ label }}</a>

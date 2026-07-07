@@ -15,6 +15,7 @@ import StationProvider, {
 } from "../../src/StationProvider.js";
 import type { AuditEvent } from "../../src/types.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
+import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
 
 // ─── Test infra ──────────────────────────────────────────────
@@ -205,6 +206,9 @@ function buildApp(db: unknown, auth?: unknown): StationAppContext {
 	const cache = new Map<unknown, unknown>();
 	bindings.set("db", () => db);
 	if (auth !== undefined) bindings.set("auth", () => auth);
+	// 57.1 — Station resolves the shared inker renderer via the `"inker"` alias
+	// (AdonisJS package-views pattern) at start(); bind a real Templates-backed stub.
+	bindings.set("inker", () => makeInkerRenderer());
 	return {
 		container: {
 			singleton(token, factory) {

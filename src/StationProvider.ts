@@ -18,6 +18,7 @@
  * swallowed.
  */
 
+import { fileURLToPath } from "node:url";
 import type {
 	BaseRepository as AtlasBaseRepository,
 	ColumnMetadata,
@@ -29,7 +30,6 @@ import { setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
-import { renderNotFoundPage } from "./views/errors/404.js";
 import { renderFormPage } from "./views/form.js";
 import { renderListPage } from "./views/list.js";
 import { renderLoginPage } from "./views/login.js";
@@ -175,6 +175,27 @@ interface AtlasModule {
 	getColumnMetadata: (entity: unknown) => ReadonlyArray<ColumnMetadata>;
 	getPrimaryKey: (entity: unknown) => string | undefined;
 	getDateColumnConfig: (entity: unknown) => Record<string, DateColumnConfig>;
+}
+
+/**
+ * Minimal slice of the host's SHARED inker renderer — the `"inker"` container
+ * alias `InkerProvider` binds. Station consumes inker EXACTLY the way it
+ * consumes `@c9up/warden`: resolved through the container, never a static OR
+ * dynamic `import "@c9up/inker"` in `src/` (57.1/D5). Following the AdonisJS
+ * package-views pattern (Edge `edge.mount(name, dir)` + `namespace::template`),
+ * Station mounts its package `templates/` as a named disk (`mount("station",
+ * dir)`) on this shared renderer and renders `station::…`. `renderToString`'s
+ * `ctx` carries the per-request store the inker helpers read; the 404 uses no
+ * helpers, so a minimal ctx suffices (57.3's login form threads the real store
+ * for `csrfField()`).
+ */
+interface InkerViewRenderer {
+	mount(diskName: string, dir: string): void;
+	renderToString(
+		ctx: object,
+		name: string,
+		data: Readonly<Record<string, unknown>>,
+	): Promise<string>;
 }
 
 /**
@@ -422,8 +443,19 @@ function snapshotEntity(
 }
 let auditCloneWarnEmitted = false;
 
+/**
+ * Filesystem path to the `.inker` templates Station ships inside the
+ * package (57.1, D3). Resolved from `import.meta.url` so the SAME path
+ * holds src-run (dev, `exports` → `./src/StationProvider.ts`) and dist-run
+ * (published, `./dist/StationProvider.js`) — `templates/` is a sibling of
+ * both `src/` and `dist/`. `fileURLToPath` (not `URL.pathname`) so a repo
+ * path containing spaces or reserved characters decodes correctly.
+ */
+const TEMPLATES_ROOT = fileURLToPath(new URL("../templates/", import.meta.url));
+
 export default class StationProvider {
 	#contexts: Map<Resource, ResourceContext> = new Map();
+	#viewRenderer: InkerViewRenderer | undefined;
 	#started = false;
 	// 54.7 auth state — populated when warden is wired AND
 	// StationConfig.requireAuth is true (default when warden is present).
@@ -476,6 +508,19 @@ export default class StationProvider {
 		const peers = await this.#loadPeers();
 		if (!peers) return;
 		const { router, atlas } = peers;
+
+		// Phase 1a2 — resolve the SHARED inker renderer (AdonisJS/Edge parity)
+		// and mount Station's package templates as the `station` disk. Unlike
+		// warden (whose absence keeps the open dev-preview path), a view engine
+		// is a HARD render requirement (D2): once an admin surface exists there
+		// is no page without it. Fail LOUD at boot when @c9up/inker is not wired
+		// — mirrors #resolveDb's loud-on-missing posture — rather than degrade
+		// silently or 500 on the first request.
+		const renderer = await this.#resolveViewRenderer();
+		// Mount once: `station::<template>` now resolves to this package's
+		// templates/ dir on the host's single inker engine (edge.mount parity).
+		renderer.mount("station", TEMPLATES_ROOT);
+		this.#viewRenderer = renderer;
 
 		// Phase 1b — wire the warden auth gate (or warn-once when it stays open).
 		this.#configureAuth(userConfig);
@@ -537,6 +582,63 @@ export default class StationProvider {
 			if (isModuleNotFound(err)) return null;
 			throw err;
 		}
+	}
+
+	/**
+	 * Resolve the host's shared inker renderer from the container (the `"inker"`
+	 * alias `InkerProvider` binds) — the AdonisJS package-views pattern (57.1,
+	 * D1/D2). A view engine is mandatory once an admin surface exists, so an
+	 * unbound or not-yet-ready `"inker"` throws a clear, actionable error at
+	 * boot (mirrors `#resolveDb`'s loud-on-missing), rather than a silent
+	 * degrade or a runtime 500. Consumed via the container only — never a
+	 * static or dynamic `import "@c9up/inker"` (D5), exactly like warden.
+	 */
+	async #resolveViewRenderer(): Promise<InkerViewRenderer> {
+		if (!this.app.container.has("inker")) {
+			throw new Error(
+				"[station] register @c9up/inker (InkerProvider) to render admin views",
+			);
+		}
+		try {
+			return await this.app.container.resolve<InkerViewRenderer>("inker");
+		} catch (cause) {
+			throw new Error(
+				"[station] @c9up/inker is registered but not ready — ensure InkerProvider (and its rosetta/router peers) boots before Station",
+				{ cause },
+			);
+		}
+	}
+
+	/**
+	 * Render Station's 404 page through the shared inker renderer (57.1).
+	 * Builds the same data the retired `renderNotFoundPage` composed and
+	 * renders the `station::errors/404` template (the package's mounted disk);
+	 * inker's `{{ }}` auto-escaping replaces the hand-rolled `escapeHtml` for
+	 * this view. `slug` is `encodeURIComponent`-safe (no HTML-special output)
+	 * so its auto-escape is a no-op in the back-link `href`. The 404 uses no
+	 * inker helpers, so a minimal render ctx is sufficient.
+	 */
+	async #renderNotFound(
+		ctx: StationHttpContext,
+		resource: Resource,
+		id: string,
+	): Promise<string> {
+		if (this.#viewRenderer === undefined) {
+			throw new Error("[station] view engine not initialised");
+		}
+		const renderCtx = {
+			request: ctx.request,
+			response: ctx.response,
+			store: new Map<string, unknown>(),
+			locale: "en",
+		};
+		return this.#viewRenderer.renderToString(renderCtx, "station::errors/404", {
+			title: "Not Found",
+			id,
+			label: resource.label,
+			labelLower: resource.label.toLowerCase(),
+			slug: encodeURIComponent(resource.name),
+		});
 	}
 
 	/**
@@ -793,7 +895,7 @@ export default class StationProvider {
 			if (row === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(renderNotFoundPage({ resource, id }));
+				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
 				return;
 			}
 			const html = renderShowPage({
@@ -877,7 +979,7 @@ export default class StationProvider {
 			if (row === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(renderNotFoundPage({ resource, id }));
+				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
 				return;
 			}
 			const html = renderFormPage({
@@ -908,7 +1010,7 @@ export default class StationProvider {
 			if (entity === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(renderNotFoundPage({ resource, id }));
+				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
 				return;
 			}
 			const body = await readBody(ctx);
@@ -987,7 +1089,7 @@ export default class StationProvider {
 			if (row === null) {
 				ctx.response.status(404);
 				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(renderNotFoundPage({ resource, id }));
+				ctx.response.send(await this.#renderNotFound(ctx, resource, id));
 				return;
 			}
 			const before = snapshotEntity(row, columns);
