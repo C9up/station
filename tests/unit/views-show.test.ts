@@ -1,7 +1,7 @@
 import type { ColumnMetadata } from "@c9up/atlas";
 import { describe, expect, it } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
-import { renderShowPage } from "../../src/views/show.js";
+import { buildShowViewModel } from "../../src/views/show.js";
 
 const userResource = defineResource({ entity: class User {} });
 
@@ -9,38 +9,44 @@ function cols(...keys: string[]): ColumnMetadata[] {
 	return keys.map((propertyKey) => ({ propertyKey }));
 }
 
-describe("station > views > renderShowPage", () => {
-	it("renders one <dt>/<dd> per column from the row data", () => {
-		const html = renderShowPage({
+describe("station > views > buildShowViewModel", () => {
+	it("flattens columns × row into pre-stringified <dt>/<dd> fields", () => {
+		const vm = buildShowViewModel({
 			resource: userResource,
 			row: { id: 7, name: "Alice", age: 30 },
 			pkColumn: "id",
 			columns: cols("id", "name", "age"),
 		});
-		expect(html).toContain("<dt>id</dt><dd>7</dd>");
-		expect(html).toContain("<dt>name</dt><dd>Alice</dd>");
-		expect(html).toContain("<dt>age</dt><dd>30</dd>");
+		expect(vm.fields).toEqual([
+			{ label: "id", value: "7" },
+			{ label: "name", value: "Alice" },
+			{ label: "age", value: "30" },
+		]);
 	});
 
-	it("XSS regression: escapes attribute-injection attempts inside cell values", () => {
-		const html = renderShowPage({
+	it("maps null/undefined field values to the empty string", () => {
+		const vm = buildShowViewModel({
 			resource: userResource,
-			row: { id: 1, bio: '<img src=x onerror="alert(1)">' },
+			row: { id: 1, bio: null },
 			pkColumn: "id",
 			columns: cols("id", "bio"),
 		});
-		expect(html).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
-		expect(html).not.toContain('<img src=x onerror="alert(1)">');
+		expect(vm.fields).toEqual([
+			{ label: "id", value: "1" },
+			{ label: "bio", value: "" },
+		]);
 	});
 
-	it("back-link URL-encodes the resource slug (single canonical href)", () => {
-		const html = renderShowPage({
+	it("composes the heading as '{label} #{id}' and an encoded back-link", () => {
+		const vm = buildShowViewModel({
 			resource: userResource,
-			row: { id: 1 },
+			row: { id: 7 },
 			pkColumn: "id",
 			columns: cols("id"),
 		});
-		expect(html).toContain('href="/admin/users"');
-		expect(html).toContain("← Back to Users");
+		expect(vm.heading).toBe("Users #7");
+		expect(vm.title).toBe("Users #7");
+		expect(vm.backHref).toBe("/admin/users");
+		expect(vm.backLabel).toBe("Users");
 	});
 });

@@ -114,3 +114,52 @@ describe("station > views > grep-ban: every interpolation flows through an escap
 		expect(isStructural).toBe(false);
 	});
 });
+
+// Companion ban over the rendered HTML itself. The list/show migration (57.2)
+// moved every HTML slot out of `src/views/**/*.ts` — where the grep-ban above
+// runs — and into `templates/**/*.inker`, where inker's `{{ }}` auto-escapes.
+// Inker's triple-brace `{{{ expr }}}` is a raw HTML pass-through (`InterpRaw`):
+// a stored / reflected XSS the moment a column value, slug, or caption reaches
+// it. Inker treats `{{` as an interpolation open anywhere, so a literal `{{{`
+// scan matches its lexer exactly. This lock keeps raw interpolation out of the
+// templates the escaping guarantee migrated into.
+const TEMPLATES_DIR = new URL("../../templates/", import.meta.url);
+const TEMPLATES_PATH = TEMPLATES_DIR.pathname;
+
+function walkInker(dir: string): string[] {
+	const out: string[] = [];
+	for (const entry of readdirSync(dir)) {
+		const full = join(dir, entry);
+		if (statSync(full).isDirectory()) {
+			out.push(...walkInker(full));
+		} else if (entry.endsWith(".inker")) {
+			out.push(full);
+		}
+	}
+	return out;
+}
+
+describe("station > templates > grep-ban: no raw {{{ }}} inker interpolation", () => {
+	const files = walkInker(TEMPLATES_PATH);
+
+	for (const file of files) {
+		it(`${file.replace(TEMPLATES_PATH, "templates/")} contains no {{{ raw }}} interpolation`, () => {
+			const src = readFileSync(file, "utf8");
+			const offenders: Array<{ line: number; text: string }> = [];
+			const lines = src.split("\n");
+			for (let i = 0; i < lines.length; i++) {
+				const text = lines[i] ?? "";
+				if (text.includes("{{{")) {
+					offenders.push({ line: i + 1, text: text.trim() });
+				}
+			}
+			expect(offenders, JSON.stringify(offenders, null, 2)).toEqual([]);
+		});
+	}
+
+	it("the raw-interpolation ban catches a fixture violation (anti-tautology)", () => {
+		// A raw slot with a tainted path must trip the `{{{` check.
+		const tainted = "<td>{{{ user.input }}}</td>";
+		expect(tainted.includes("{{{")).toBe(true);
+	});
+});

@@ -31,9 +31,9 @@ import type { AuditEvent, Resource, ResourceAction } from "./types.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
 import { renderFormPage } from "./views/form.js";
-import { renderListPage } from "./views/list.js";
+import { buildListViewModel } from "./views/list.js";
 import { renderLoginPage } from "./views/login.js";
-import { renderShowPage } from "./views/show.js";
+import { buildShowViewModel } from "./views/show.js";
 
 /**
  * Duck-typed slice of the host's IoC container — Station MUST stay
@@ -654,6 +654,36 @@ export default class StationProvider {
 	}
 
 	/**
+	 * Render a Station template through the shared inker renderer (57.2). Builds
+	 * the same minimal render ctx as `#renderNotFound` (the list/show views use
+	 * no inker helpers) and delegates escaping to inker's `{{ }}`. Used by the
+	 * list + show handlers. Unlike the retired hand-rolled builders — pure
+	 * `(input) => string` functions that could only throw on their own logic —
+	 * this path can additionally fault on template lookup, fs, or parse errors.
+	 * Such a fault propagates to the root error boundary as a 500, which is the
+	 * correct outcome on the success path: a broken list/show template is a real
+	 * server error and must not be masked as a degraded 200. (`#renderNotFound`
+	 * wraps its render in a static fallback only because a not-found is already
+	 * an error response that must never escalate into a 500.)
+	 */
+	async #renderView(
+		ctx: StationHttpContext,
+		name: string,
+		data: Readonly<Record<string, unknown>>,
+	): Promise<string> {
+		if (this.#viewRenderer === undefined) {
+			throw new Error("[station] view engine not initialised");
+		}
+		const renderCtx = {
+			request: ctx.request,
+			response: ctx.response,
+			store: new Map<string, unknown>(),
+			locale: "en",
+		};
+		return await this.#viewRenderer.renderToString(renderCtx, name, data);
+	}
+
+	/**
 	 * Wire the warden auth gate from the `station` config block. When warden is
 	 * not installed/bound the gate stays open and a one-time warning is emitted.
 	 */
@@ -875,7 +905,7 @@ export default class StationProvider {
 				.orderBy(pkColumn, "desc")
 				.forPage(page, perPage)
 				.exec();
-			const html = renderListPage({
+			const viewModel = buildListViewModel({
 				resource,
 				rows,
 				columns,
@@ -885,6 +915,7 @@ export default class StationProvider {
 				total,
 				lastPage,
 			});
+			const html = await this.#renderView(ctx, "station::list", viewModel);
 			ctx.response.type("text/html; charset=utf-8");
 			ctx.response.send(html);
 		};
@@ -911,12 +942,13 @@ export default class StationProvider {
 				ctx.response.send(notFoundHtml);
 				return;
 			}
-			const html = renderShowPage({
+			const viewModel = buildShowViewModel({
 				resource,
 				row,
 				columns,
 				pkColumn,
 			});
+			const html = await this.#renderView(ctx, "station::show", viewModel);
 			ctx.response.type("text/html; charset=utf-8");
 			ctx.response.send(html);
 		};

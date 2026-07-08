@@ -1,0 +1,4 @@
+{% layout 'station::layout' %}
+<h1>{{ heading }}</h1>
+<dl>{% each fields as f %}<dt>{{ f.label }}</dt><dd>{{ f.value }}</dd>{% endeach %}</dl>
+<a class="st-backlink" href="{{ backHref }}">← Back to {{ backLabel }}</a>
