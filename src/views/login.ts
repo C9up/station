@@ -5,12 +5,13 @@
  * `buildLoginHandler` runs them through `auth.authenticate(...)` and
  * sets a session cookie on success.
  *
- * Every dynamic value flows through `escapeHtml()` so a tampered
- * `?error=…` query parameter cannot smuggle markup into the page.
+ * Pure `(input) => LoginViewModel` builder (Story 57.3): every value reaches
+ * HTML through `templates/login.inker`'s `{{ }}` auto-escape (the retired
+ * `escape.ts` no longer runs here), so a tampered `?error=…` query parameter
+ * cannot smuggle markup into the page. The CSRF hidden input is emitted by
+ * inker's canonical `{{ csrfField() }}` helper, guarded by the precomputed
+ * `csrfEnabled` boolean.
  */
-
-import { escapeHtml, safeHtml } from "./escape.js";
-import { renderLayout } from "./layout.js";
 
 export interface LoginPageInput {
 	/** Pre-fill the email field (e.g. after a failed attempt). */
@@ -19,47 +20,33 @@ export interface LoginPageInput {
 	error?: string;
 	/** Form action path. Default `/admin/login`. */
 	action?: string;
-	/** Caller-controlled hidden inputs (typically `_csrf`). */
-	hiddenInputs?: ReadonlyArray<{ name: string; value: string }>;
+	/**
+	 * Whether the host has a CSRF token in the per-request store. When true the
+	 * template emits `{{ csrfField() }}`; the handler derives it from
+	 * `ctx.store` (57.3). Replaces the old `hiddenInputs?` array.
+	 */
+	csrfEnabled?: boolean;
 }
 
-export function renderLoginPage(input: LoginPageInput): string {
-	const email = input.email ?? "";
-	const error = input.error;
-	const action = input.action ?? "/admin/login";
+// A `type` alias (not `interface`) so the view-model carries an implicit index
+// signature and stays assignable to the renderer's
+// `Readonly<Record<string, unknown>>` data param without a cast.
+export type LoginViewModel = {
+	title: string;
+	email: string;
+	action: string;
+	error: string;
+	csrfEnabled: boolean;
+};
 
-	const hiddens = (input.hiddenInputs ?? [])
-		.map(
-			(h) =>
-				`<input type="hidden" name="${escapeHtml(h.name)}" value="${escapeHtml(h.value)}">`,
-		)
-		.join("");
-
-	const errorBlock =
-		error !== undefined
-			? `<p class="st-form-error" role="alert">${escapeHtml(error)}</p>`
-			: "";
-
-	const body =
-		`<h1>Sign in</h1>` +
-		errorBlock +
-		`<form class="st-form" method="POST" action="${escapeHtml(action)}">` +
-		hiddens +
-		`<div class="st-field">` +
-		`<label for="f-email">Email</label>` +
-		`<input id="f-email" type="email" name="email" value="${escapeHtml(email)}" required autocomplete="email" autofocus>` +
-		`</div>` +
-		`<div class="st-field">` +
-		`<label for="f-password">Password</label>` +
-		`<input id="f-password" type="password" name="password" required autocomplete="current-password">` +
-		`</div>` +
-		`<div class="st-form-actions">` +
-		`<button type="submit">Sign in</button>` +
-		`</div>` +
-		`</form>`;
-
-	return renderLayout({
+export function buildLoginViewModel(input: LoginPageInput): LoginViewModel {
+	return {
 		title: "Sign in",
-		bodyHtml: safeHtml(body),
-	});
+		email: input.email ?? "",
+		// No URL-encoding: the login action is a fixed host-configured path.
+		action: input.action ?? "/admin/login",
+		// Empty string is falsy in inker, so `{% if error %}` gates the block.
+		error: input.error ?? "",
+		csrfEnabled: input.csrfEnabled === true,
+	};
 }

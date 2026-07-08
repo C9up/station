@@ -30,9 +30,9 @@ import { setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
-import { renderFormPage } from "./views/form.js";
+import { buildFormViewModel } from "./views/form.js";
 import { buildListViewModel } from "./views/list.js";
-import { renderLoginPage } from "./views/login.js";
+import { buildLoginViewModel } from "./views/login.js";
 import { buildShowViewModel } from "./views/show.js";
 
 /**
@@ -185,9 +185,9 @@ interface AtlasModule {
  * package-views pattern (Edge `edge.mount(name, dir)` + `namespace::template`),
  * Station mounts its package `templates/` as a named disk (`mount("station",
  * dir)`) on this shared renderer and renders `station::…`. `renderToString`'s
- * `ctx` carries the per-request store the inker helpers read; the 404 uses no
- * helpers, so a minimal ctx suffices (57.3's login form threads the real store
- * for `csrfField()`).
+ * `ctx` carries the per-request store the inker helpers read: the form + login
+ * views thread the real `ctx.store` (57.3/D3) so `{{ csrfField() }}` reaches the
+ * token; the 404/list/show views call no helpers, so the store is inert there.
  */
 interface InkerViewRenderer {
 	mount(diskName: string, dir: string): void;
@@ -674,10 +674,13 @@ export default class StationProvider {
 		if (this.#viewRenderer === undefined) {
 			throw new Error("[station] view engine not initialised");
 		}
+		// Thread the real per-request store (57.3/D3) so the als-backed inker
+		// helpers — `csrfField()` on the form/login views — read the token. Inert
+		// for list/show, whose templates call no helpers.
 		const renderCtx = {
 			request: ctx.request,
 			response: ctx.response,
-			store: new Map<string, unknown>(),
+			store: ctx.store ?? new Map<string, unknown>(),
 			locale: "en",
 		};
 		return await this.#viewRenderer.renderToString(renderCtx, name, data);
@@ -965,12 +968,13 @@ export default class StationProvider {
 				deny(ctx);
 				return;
 			}
-			const html = renderFormPage({
+			const vm = buildFormViewModel({
 				resource,
 				columns,
 				pkColumn,
-				hiddenInputs: csrfHiddenInputs(ctx),
+				csrfEnabled: ctx.store?.get("csrfToken") != null,
 			});
+			const html = await this.#renderView(ctx, "station::form", vm);
 			ctx.response.type("text/html; charset=utf-8");
 			ctx.response.send(html);
 		};
@@ -1028,13 +1032,14 @@ export default class StationProvider {
 				ctx.response.send(notFoundHtml);
 				return;
 			}
-			const html = renderFormPage({
+			const vm = buildFormViewModel({
 				resource,
 				columns,
 				pkColumn,
 				row,
-				hiddenInputs: csrfHiddenInputs(ctx),
+				csrfEnabled: ctx.store?.get("csrfToken") != null,
 			});
+			const html = await this.#renderView(ctx, "station::form", vm);
 			ctx.response.type("text/html; charset=utf-8");
 			ctx.response.send(html);
 		};
@@ -1337,11 +1342,12 @@ export default class StationProvider {
 			}
 			const qs = ctx.request.qs();
 			const errorParam = qs.error;
-			const html = renderLoginPage({
+			const vm = buildLoginViewModel({
 				action: this.#authConfig.loginPath,
 				error: typeof errorParam === "string" ? errorParam : undefined,
-				hiddenInputs: csrfHiddenInputs(ctx),
+				csrfEnabled: ctx.store?.get("csrfToken") != null,
 			});
+			const html = await this.#renderView(ctx, "station::login", vm);
 			ctx.response.type("text/html; charset=utf-8");
 			ctx.response.send(html);
 		};
@@ -1366,12 +1372,13 @@ export default class StationProvider {
 			const email = typeof body.email === "string" ? body.email.trim() : "";
 			const password = typeof body.password === "string" ? body.password : "";
 			if (email.length === 0 || password.length === 0) {
-				const html = renderLoginPage({
+				const vm = buildLoginViewModel({
 					action: this.#authConfig.loginPath,
 					email,
 					error: "Email and password are both required.",
-					hiddenInputs: csrfHiddenInputs(ctx),
+					csrfEnabled: ctx.store?.get("csrfToken") != null,
 				});
+				const html = await this.#renderView(ctx, "station::login", vm);
 				ctx.response.status(400);
 				ctx.response.type("text/html; charset=utf-8");
 				ctx.response.send(html);
@@ -1384,12 +1391,13 @@ export default class StationProvider {
 			const token =
 				typeof result.user?.token === "string" ? result.user.token : undefined;
 			if (!result.authenticated || token === undefined) {
-				const html = renderLoginPage({
+				const vm = buildLoginViewModel({
 					action: this.#authConfig.loginPath,
 					email,
 					error: result.error ?? "Invalid email or password.",
-					hiddenInputs: csrfHiddenInputs(ctx),
+					csrfEnabled: ctx.store?.get("csrfToken") != null,
 				});
+				const html = await this.#renderView(ctx, "station::login", vm);
 				ctx.response.status(401);
 				ctx.response.type("text/html; charset=utf-8");
 				ctx.response.send(html);
@@ -1631,28 +1639,6 @@ async function parseBody(
 	if (typeof ctx.request.body !== "function") return {};
 	const raw = await ctx.request.body();
 	return isPlainRecord(raw) ? raw : {};
-}
-
-/**
- * Read the CSRF token (when present) from `ctx.store` and shape it as
- * a `hiddenInputs[]` entry for `renderFormPage`. The key `csrfToken`
- * matches the @c9up/blackhole `csrfToken` convention so a fully-
- * wired host stamps the token automatically; a host that doesn't wire
- * CSRF returns no hidden input, and the form is unprotected (the
- * boot-time warn-once already flagged this).
- *
- * The form field is named `_csrf` to match Adonis / Blackhole's
- * default. Hosts using a different field name can override by writing
- * their own hiddenInputs into ctx.store under a richer key, but for
- * the common case this is the zero-config path.
- */
-function csrfHiddenInputs(
-	ctx: StationHttpContext,
-): ReadonlyArray<{ name: string; value: string }> | undefined {
-	if (ctx.store === undefined) return undefined;
-	const token = ctx.store.get("csrfToken");
-	if (typeof token !== "string" || token.length === 0) return undefined;
-	return [{ name: "_csrf", value: token }];
 }
 
 function redirectToShow(
