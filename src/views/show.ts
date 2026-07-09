@@ -60,7 +60,7 @@ export function buildShowViewModel(input: ShowPageInput): ShowViewModel {
 	};
 }
 
-/** Match the retired `escapeHtml(null | undefined)` behaviour of empty output. */
+/** Match the retired escaper's `null | undefined` → empty-output behaviour. */
 function stringifyValue(value: unknown): string {
 	return value === null || value === undefined ? "" : String(value);
 }

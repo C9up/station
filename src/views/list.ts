@@ -81,7 +81,7 @@ export function buildListViewModel(input: ListPageInput): ListViewModel {
 	};
 }
 
-/** Match the retired `escapeHtml(null | undefined)` → `""` behaviour. */
+/** Match the retired escaper's `null | undefined` → `""` behaviour. */
 function stringifyCell(value: unknown): string {
 	return value === null || value === undefined ? "" : String(value);
 }

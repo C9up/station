@@ -1,8 +1,8 @@
-{% layout 'station::layout' %}
+@layout('station::layout')
 <h1>{{ heading }}</h1>
-{% if empty %}<p class="st-empty">No {{ labelLower }} yet.</p>{% else %}<table>
-<thead><tr>{% each columns as col %}<th>{{ col }}</th>{% endeach %}<th></th></tr></thead>
-<tbody>{% each rows as row %}<tr>{% each row.cells as cell %}<td>{{ cell }}</td>{% endeach %}<td><a href="{{ row.showHref }}">Show</a></td></tr>{% endeach %}</tbody>
-</table>{% endif %}
-<div class="st-pager">{% if pager.prev.disabled %}<span class="st-disabled">« Prev</span>{% else %}<a href="{{ pager.prev.href }}">« Prev</a>{% endif %}{% each pager.pages as p %}{% if p.isEllipsis %}<span class="st-ellipsis">…</span>{% elseif p.isCurrent %}<strong>{{ p.n }}</strong>{% else %}<a href="{{ p.href }}">{{ p.n }}</a>{% endif %}{% endeach %}{% if pager.next.disabled %}<span class="st-disabled">Next »</span>{% else %}<a href="{{ pager.next.href }}">Next »</a>{% endif %}</div>
-{% if caption.show %}<p class="st-caption">Showing {{ caption.start }}–{{ caption.end }} of {{ caption.total }}</p>{% endif %}
+@if(empty)<p class="st-empty">No {{ labelLower }} yet.</p>@else<table>
+<thead><tr>@each(col in columns)<th>{{ col }}</th>@endeach<th></th></tr></thead>
+<tbody>@each(row in rows)<tr>@each(cell in row.cells)<td>{{ cell }}</td>@endeach<td><a href="{{ row.showHref }}">Show</a></td></tr>@endeach</tbody>
+</table>@endif
+<div class="st-pager">@if(pager.prev.disabled)<span class="st-disabled">« Prev</span>@else<a href="{{ pager.prev.href }}">« Prev</a>@endif@each(p in pager.pages)@if(p.isEllipsis)<span class="st-ellipsis">…</span>@elseif(p.isCurrent)<strong>{{ p.n }}</strong>@else<a href="{{ p.href }}">{{ p.n }}</a>@endif@endeach@if(pager.next.disabled)<span class="st-disabled">Next »</span>@else<a href="{{ pager.next.href }}">Next »</a>@endif</div>
+@if(caption.show)<p class="st-caption">Showing {{ caption.start }}–{{ caption.end }} of {{ caption.total }}</p>@endif

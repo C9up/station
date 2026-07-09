@@ -613,7 +613,7 @@ export default class StationProvider {
 	 * Render Station's 404 page through the shared inker renderer (57.1).
 	 * Builds the same data the retired `renderNotFoundPage` composed and
 	 * renders the `station::errors/404` template (the package's mounted disk);
-	 * inker's `{{ }}` auto-escaping replaces the hand-rolled `escapeHtml` for
+	 * inker's `{{ }}` auto-escaping replaces the hand-rolled escaper for
 	 * this view. `slug` is `encodeURIComponent`-safe (no HTML-special output)
 	 * so its auto-escape is a no-op in the back-link `href`. The 404 uses no
 	 * inker helpers, so a minimal render ctx is sufficient.
@@ -1701,15 +1701,18 @@ async function emitAudit(resource: Resource, event: AuditEvent): Promise<void> {
 }
 
 /**
- * Tiny HTML-escape for the 405 error body — duplicated here rather
- * than imported from views/escape.ts to keep the dependency surface
- * of StationProvider minimal (views are otherwise only reached via
- * the renderer modules).
+ * Tiny HTML-escape for the 404 / 405 error bodies — a self-contained
+ * local helper. Station keeps no shared TS escaper (inker's `{{ }}`
+ * owns view escaping); this covers the error bodies that are sent as
+ * `text/html` without going through the inker renderer. Escapes the
+ * same five characters as inker so the two escaping paths stay in
+ * parity (`&` first to avoid double-encoding).
  */
 function escapeMin(value: string): string {
 	return value
 		.replace(/&/g, "&amp;")
 		.replace(/</g, "&lt;")
 		.replace(/>/g, "&gt;")
-		.replace(/"/g, "&quot;");
+		.replace(/"/g, "&quot;")
+		.replace(/'/g, "&#39;");
 }

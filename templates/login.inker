@@ -1,4 +1,4 @@
-{% layout 'station::layout' %}
+@layout('station::layout')
 <h1>Sign in</h1>
-{% if error %}<p class="st-form-error" role="alert">{{ error }}</p>{% endif %}
-<form class="st-form" method="POST" action="{{ action }}">{% if csrfEnabled %}{{ csrfField() }}{% endif %}<div class="st-field"><label for="f-email">Email</label><input id="f-email" type="email" name="email" value="{{ email }}" required autocomplete="email" autofocus></div><div class="st-field"><label for="f-password">Password</label><input id="f-password" type="password" name="password" required autocomplete="current-password"></div><div class="st-form-actions"><button type="submit">Sign in</button></div></form>
+@if(error)<p class="st-form-error" role="alert">{{ error }}</p>@endif
+<form class="st-form" method="POST" action="{{ action }}">@if(csrfEnabled){{ csrfField() }}@endif<div class="st-field"><label for="f-email">Email</label><input id="f-email" type="email" name="email" value="{{ email }}" required autocomplete="email" autofocus></div><div class="st-field"><label for="f-password">Password</label><input id="f-password" type="password" name="password" required autocomplete="current-password"></div><div class="st-form-actions"><button type="submit">Sign in</button></div></form>
