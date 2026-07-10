@@ -124,11 +124,12 @@ function buildSeededDb(userCount: number) {
 		users.push({ id: i, name: `user-${i}`, age: 20 + (i % 50) });
 	}
 	function runQuery(sql: string, params: unknown[]): Record<string, unknown>[] {
-		// COUNT scalar — atlas's `#runScalar` aliases the aggregate as
-		// `__scalar__`. Returning the alias is mandatory; using `count` or
-		// `COUNT(*)` keys silently falls back to 0.
+		// COUNT scalar — two atlas call paths read it under DIFFERENT aliases:
+		// `#runScalar` (`count()`) aliases `AS __scalar__`, while `paginate()`
+		// aliases `COUNT(*) AS count` and reads `cRows[0].count`. Return BOTH
+		// keys so either path resolves a real total (else it silently → 0).
 		if (sql.includes("COUNT(*)")) {
-			return [{ __scalar__: users.length }];
+			return [{ __scalar__: users.length, count: users.length }];
 		}
 		// `find(pk)` — `SELECT ... WHERE "id" = ? LIMIT 1`. Match on the
 		// WHERE clause specifically because the COUNT branch above also

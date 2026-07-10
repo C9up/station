@@ -158,9 +158,24 @@ interface StationRepository {
 
 interface StationQuery {
 	orderBy(column: string, direction: "asc" | "desc"): StationQuery;
-	forPage(page: number, perPage: number): StationQuery;
 	exec(): Promise<Record<string, unknown>[]>;
-	count(column?: string): Promise<number>;
+	paginate(page: number, perPage: number): Promise<StationPaginator>;
+}
+
+/**
+ * Minimal structural mirror of atlas's `Paginator` — only the surface the list
+ * handler reads. Kept structural (like `StationQuery`/`StationRepository`) so
+ * Station never couples to atlas's generic `Paginator<T>` value/type.
+ */
+interface StationPaginator {
+	all(): Record<string, unknown>[];
+	meta: {
+		total: number;
+		perPage: number;
+		currentPage: number;
+		lastPage: number;
+		firstPage: number;
+	};
 }
 
 /** Per-resource snapshot built once at `start()`, reused on every request. */
@@ -883,31 +898,34 @@ export default class StationProvider {
 				);
 			}
 
-			const total = await repo.query().count();
-			const lastPage = Math.max(1, Math.ceil(total / perPage));
-			if (page > lastPage && total > 0) {
+			// De-hand-rolled (57.5): atlas `paginate()` runs the parallel
+			// COUNT(*) + LIMIT/OFFSET data fetch in one call and owns the
+			// `lastPage = ceil(total/perPage)` math Station used to duplicate.
+			// Station keeps only the `MAX_PER_PAGE` clamp (above) and the
+			// redirect-to-last-page wrapper — atlas floors perPage to ≥1 but
+			// does not cap it.
+			const result = await repo
+				.query()
+				.orderBy(pkColumn, "desc")
+				.paginate(page, perPage);
+			if (page > result.meta.lastPage && result.meta.total > 0) {
 				// Never render an empty page when one exists — redirect to the
 				// last real page so the user lands on something useful.
 				ctx.response.redirect(
-					`/admin/${resource.name}?page=${lastPage}&perPage=${perPage}`,
+					`/admin/${resource.name}?page=${result.meta.lastPage}&perPage=${perPage}`,
 				);
 				return;
 			}
 
-			const rows = await repo
-				.query()
-				.orderBy(pkColumn, "desc")
-				.forPage(page, perPage)
-				.exec();
 			const viewModel = buildListViewModel({
 				resource,
-				rows,
+				rows: result.all(),
 				columns,
 				pkColumn,
-				page,
-				perPage,
-				total,
-				lastPage,
+				page: result.meta.currentPage,
+				perPage: result.meta.perPage,
+				total: result.meta.total,
+				lastPage: result.meta.lastPage,
 			});
 			const html = await this.#renderView(ctx, "station::list", viewModel);
 			ctx.response.type("text/html; charset=utf-8");
