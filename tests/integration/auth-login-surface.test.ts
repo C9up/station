@@ -111,6 +111,8 @@ interface HttpContextLike {
 		body?(): Promise<unknown> | unknown;
 		header?(name: string): string | undefined;
 		cookie?(name: string): string | undefined;
+		/** Blackhole's CSRF-verified signal — login/logout fail-close on it (57.6). */
+		csrfProtected?: boolean;
 	};
 	response: ReturnType<ResponseRecorder["fns"]["status"]> extends unknown
 		? Record<string, unknown>
@@ -125,6 +127,12 @@ function buildCtx(opts: {
 	body?: Record<string, unknown>;
 	headers?: Record<string, string>;
 	cookies?: Record<string, string>;
+	/**
+	 * Blackhole's CSRF-verified signal. Defaults to `true` so the login/logout
+	 * POST handlers (which now fail-close on it, 57.6) proceed — these tests
+	 * predate CSRF enforcement and exercise the auth surface, not CSRF.
+	 */
+	csrfProtected?: boolean;
 }): { ctx: HttpContextLike; res: ResponseRecorder } {
 	const res = new ResponseRecorder();
 	const query = opts.query ?? {};
@@ -137,6 +145,7 @@ function buildCtx(opts: {
 			body: body !== undefined ? () => body : undefined,
 			header: (name) => headers[name.toLowerCase()],
 			cookie: (name) => cookies[name],
+			csrfProtected: opts.csrfProtected ?? true,
 		},
 		response: bypassTypeCheck<HttpContextLike["response"]>(res.fns),
 		params: opts.params ?? {},
@@ -282,8 +291,14 @@ function buildMinimalDb() {
 		},
 		query<T>(sql: string, params: unknown[] = []): Promise<T[]> {
 			if (sql.includes("COUNT(*)")) {
+				// COUNT scalar under both atlas aliases: `#runScalar` reads
+				// `__scalar__`, `paginate()` reads `count`. The list handler
+				// routed here goes through `paginate()`, so `count` is
+				// mandatory (else `meta.total` silently resolves to 0).
 				return Promise.resolve(
-					bypassTypeCheck<T[]>([{ __scalar__: rows.length }]),
+					bypassTypeCheck<T[]>([
+						{ __scalar__: rows.length, count: rows.length },
+					]),
 				);
 			}
 			if (sql.includes('WHERE "id" = ?') || sql.includes("WHERE id = ?")) {
@@ -458,6 +473,43 @@ describe("station > integration > 54.7 warden integration + login surface", () =
 		expect(res.clearedCookies).toContain("station_auth");
 		expect(res.status).toBe(302);
 		expect(res.location).toBe("/admin/login");
+	});
+
+	// 57.6 — the login surface fail-closes on CSRF too. Login is open (no auth
+	// gate), so the CSRF guard is its sole pre-check; logout must not be forceable
+	// cross-site. Both refuse before doing any work when the request wasn't
+	// CSRF-verified (`ctx.request.csrfProtected !== true`).
+	it("POST /admin/login with csrfProtected=false → 403 before authenticate", async () => {
+		const { manager } = buildFakeAuth({});
+		const { routes } = await bootStation({ auth: manager });
+		const login = routes.find(
+			(r) => r.method === "post" && r.path === "/admin/login",
+		);
+		if (!login) throw new Error("unreachable");
+		const { ctx, res } = buildCtx({
+			body: { email: "admin@example.com", password: "hunter2" },
+			csrfProtected: false,
+		});
+		await login.handler(ctx);
+		expect(res.status).toBe(403);
+		// No session cookie was set — the credentials were never checked.
+		expect(res.cookies.size).toBe(0);
+	});
+
+	it("POST /admin/logout with csrfProtected=false → 403, cookie NOT cleared", async () => {
+		const { manager } = buildFakeAuth({});
+		const { routes } = await bootStation({ auth: manager });
+		const logout = routes.find(
+			(r) => r.method === "post" && r.path === "/admin/logout",
+		);
+		if (!logout) throw new Error("unreachable");
+		const { ctx, res } = buildCtx({
+			cookies: { station_auth: "anything" },
+			csrfProtected: false,
+		});
+		await logout.handler(ctx);
+		expect(res.status).toBe(403);
+		expect(res.clearedCookies).not.toContain("station_auth");
 	});
 
 	it("gated CRUD route w/o token → 302 /admin/login", async () => {

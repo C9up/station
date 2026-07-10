@@ -70,6 +70,14 @@ interface StationHttpContext {
 		url?(): string;
 		header?(name: string): string | undefined;
 		cookie?(name: string): string | undefined;
+		/**
+		 * `true` only when the host's `@c9up/blackhole` middleware enforced +
+		 * validated CSRF for this request (a first-class ream `HttpContext`
+		 * contract). Station fail-closes every admin write route on this — a
+		 * seeded token is NOT proof of verification, so this is the ONLY signal
+		 * trusted for enforcement.
+		 */
+		csrfProtected?: boolean;
 	};
 	response: {
 		status(code: number): unknown;
@@ -317,7 +325,7 @@ let authWarnEmitted = false;
 let perPageClampWarned = false;
 let seedPermsWarned = false;
 let missingAuditWarned = false;
-let csrfWarnEmitted = false;
+let csrfBlockedWarned = false;
 
 /** @internal Reset module-level flags between tests. */
 export function resetStationProviderFlags(): void {
@@ -325,7 +333,7 @@ export function resetStationProviderFlags(): void {
 	perPageClampWarned = false;
 	seedPermsWarned = false;
 	missingAuditWarned = false;
-	csrfWarnEmitted = false;
+	csrfBlockedWarned = false;
 }
 
 const TIMESTAMP_PROPERTY_KEYS: ReadonlySet<string> = new Set([
@@ -534,13 +542,13 @@ export default class StationProvider {
 			this.#contexts.set(resource, buildResourceContext(resource, db, atlas));
 		}
 
-		// 56.5 + 54.6 + CSRF boot-time warn-onces. We surface the "auth
-		// wired but no permissions seeded", "no audit sink", and "no CSRF
-		// check" gaps loud-and-once so a half-wired install can't ship to
-		// prod without operators noticing.
+		// 56.5 + 54.6 boot-time warn-onces. We surface the "auth wired but no
+		// permissions seeded" and "no audit sink" gaps loud-and-once so a
+		// half-wired install can't ship to prod without operators noticing.
+		// (CSRF is no longer a boot-time warn — enforcement is request-time and
+		// honest now: every write route fail-closes on `ctx.request.csrfProtected`.)
 		this.#warnSeedPermissionsOnce(resources);
 		this.#warnAuditGapsOnce(resources);
-		this.#warnCsrfGapOnce(resources);
 
 		// Phase 3 — route registration. The router proxy may still throw
 		// "Router accessed before initialization" on first property access
@@ -818,23 +826,6 @@ export default class StationProvider {
 		);
 	}
 
-	#warnCsrfGapOnce(resources: ReadonlyArray<Resource>): void {
-		if (csrfWarnEmitted) return;
-		const writeActions: ReadonlyArray<ResourceAction> = [
-			"create",
-			"edit",
-			"destroy",
-		];
-		const writeEnabled = resources.some((r) =>
-			r.actions.some((a) => writeActions.includes(a)),
-		);
-		if (!writeEnabled) return;
-		csrfWarnEmitted = true;
-		console.warn(
-			"[station] Write-enabled resources are mounted but Station does NOT enforce CSRF at the handler level. Wire @c9up/blackhole (csrf: true) or an equivalent middleware in start/kernel.ts BEFORE production — a missing CSRF check on /admin/<resource>/:id POST allows cross-site form submission to mutate rows under any logged-in user's session.",
-		);
-	}
-
 	#warnAuditGapsOnce(resources: ReadonlyArray<Resource>): void {
 		if (missingAuditWarned) return;
 		const writeActions: ReadonlyArray<ResourceAction> = [
@@ -984,6 +975,14 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
+			// Fail-close: reject a request whose CSRF was not enforced+validated
+			// (blackhole unwired / csrf:false / route excepted) BEFORE any auth or
+			// DB work — no 404-vs-403 oracle to a forged request. A seeded token is
+			// not proof; only `csrfProtected === true` is (AC4/AC7).
+			if (ctx.request.csrfProtected !== true) {
+				denyCsrf(ctx);
+				return;
+			}
 			const { repo, pkColumn, columns, autoManaged } =
 				this.#requireContext(resource);
 			if (
@@ -1049,6 +1048,11 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
+			// Fail-close on CSRF before any auth/DB work (see #buildCreateHandler).
+			if (ctx.request.csrfProtected !== true) {
+				denyCsrf(ctx);
+				return;
+			}
 			const { repo, pkColumn, columns, autoManaged } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
@@ -1106,6 +1110,14 @@ export default class StationProvider {
 		const updateHandler = this.#buildUpdateHandler(resource);
 		const destroyHandler = this.#buildDestroyHandler(resource);
 		return async (ctx) => {
+			// Fail-close on CSRF before reading the body (see #buildCreateHandler).
+			// The PUT/DELETE branches delegate to already-guarded handlers, but the
+			// unsupported-override 405 branch would otherwise do work on a forged
+			// request and leak a 403-vs-405 oracle — guard the entrypoint too.
+			if (ctx.request.csrfProtected !== true) {
+				denyCsrf(ctx);
+				return;
+			}
 			const body = await readBody(ctx);
 			const override = String(body._method ?? "").toUpperCase();
 			if (override === "PUT" || override === "PATCH") {
@@ -1128,6 +1140,11 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
+			// Fail-close on CSRF before any auth/DB work (see #buildCreateHandler).
+			if (ctx.request.csrfProtected !== true) {
+				denyCsrf(ctx);
+				return;
+			}
 			const { repo, pkColumn, columns } = this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (
@@ -1361,6 +1378,13 @@ export default class StationProvider {
 	 */
 	#buildLoginPostHandler(): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx: StationHttpContext): Promise<void> => {
+			// Fail-close on CSRF first — a forged login POST is refused before any
+			// AuthManager work (see #buildCreateHandler). Login is open by design
+			// (no auth gate), so CSRF is the sole pre-check here.
+			if (ctx.request.csrfProtected !== true) {
+				denyCsrf(ctx);
+				return;
+			}
 			const manager = this.#authManager;
 			if (manager === undefined) {
 				ctx.response.status(500);
@@ -1420,6 +1444,12 @@ export default class StationProvider {
 	 */
 	#buildLogoutHandler(): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx: StationHttpContext): Promise<void> => {
+			// Fail-close on CSRF: a forged cross-site POST must not be able to log
+			// an admin out (session-fixation nuisance) (see #buildCreateHandler).
+			if (ctx.request.csrfProtected !== true) {
+				denyCsrf(ctx);
+				return;
+			}
 			ctx.response.clearCookie?.(this.#authConfig.cookieName, {
 				path: "/",
 			});
@@ -1603,6 +1633,37 @@ function deny(ctx: StationHttpContext): void {
 	ctx.response.type("text/html; charset=utf-8");
 	ctx.response.send(
 		"<h1>403 Forbidden</h1><p>Your account does not have access to this resource action.</p>",
+	);
+}
+
+/**
+ * Fail-closed CSRF denial (403), mirroring {@link deny}'s content negotiation.
+ * Fires when a write reaches an admin handler without a CSRF-verified request
+ * (`ctx.request.csrfProtected !== true`). The FIRST block per process also emits
+ * one `console.error` — unlike the removed boot-time warning it can never
+ * false-alarm (it accompanies a real unprotected write attempt), pointing the
+ * operator at the actual misconfiguration (blackhole unwired / `csrf: false` /
+ * `/admin/*` excepted).
+ */
+function denyCsrf(ctx: StationHttpContext): void {
+	if (!csrfBlockedWarned) {
+		csrfBlockedWarned = true;
+		console.error(
+			"[station] Blocked a write to /admin/* — CSRF was not enforced for this request. Check that @c9up/blackhole is wired (csrf: true) in start/kernel.ts, /admin/* is NOT in csrf.exceptRoutes, and the blackhole native addon has been rebuilt (a stale .node predates the csrfProtected signal and always reads undefined). Returning 403.",
+		);
+	}
+	ctx.response.status(403);
+	if (wantsJsonResponse(ctx)) {
+		ctx.response.json({
+			error: "Forbidden",
+			code: "CSRF_REQUIRED",
+			message: "This admin action requires an active, verified CSRF token.",
+		});
+		return;
+	}
+	ctx.response.type("text/html; charset=utf-8");
+	ctx.response.send(
+		"<h1>403 Forbidden</h1><p>This admin action requires an active, verified CSRF token.</p>",
 	);
 }
 

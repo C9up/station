@@ -33,6 +33,8 @@ interface HttpContextLike {
 		url?(): string;
 		header?(name: string): string | undefined;
 		cookie?(name: string): string | undefined;
+		/** Blackhole's CSRF-verified signal — every write handler fail-closes on it (57.6). */
+		csrfProtected?: boolean;
 	};
 	response: ResponseRecorder;
 	params: Record<string, string>;
@@ -88,6 +90,13 @@ function buildCtx(opts: {
 	user?: { id: unknown; [k: string]: unknown } | null;
 	headers?: Record<string, string>;
 	cookies?: Record<string, string>;
+	/**
+	 * Blackhole's CSRF-verified signal. Defaults to `true` so the write handlers
+	 * (which now fail-close on it, 57.6) proceed as before — these tests predate
+	 * enforcement and exercise CRUD/policy/audit mechanics, not CSRF. The
+	 * dedicated CSRF-guard tests pass `false`/omit it to prove the fail-close.
+	 */
+	csrfProtected?: boolean;
 }): { ctx: HttpContextLike; res: ResponseRecorder } {
 	const res = new ResponseRecorder();
 	const resolvedUser = opts.user === undefined ? ADMIN_USER : opts.user;
@@ -99,6 +108,7 @@ function buildCtx(opts: {
 			body: () => opts.body ?? {},
 			header: (name) => headers[name.toLowerCase()],
 			cookie: (name) => cookies[name],
+			csrfProtected: opts.csrfProtected ?? true,
 		},
 		response: bypassTypeCheck<HttpContextLike["response"]>({
 			status: res.status$,
@@ -640,35 +650,173 @@ describe("station > security hardening", () => {
 		expect(stored?.id).toBe(7);
 	});
 
-	it("CSRF warn-once fires when write-enabled resources mount", async () => {
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		try {
-			const { db } = buildFakeDb();
-			await bootStation({ db, resources: [{ entity: User }] });
-			const csrfCall = warn.mock.calls.find((c) =>
-				String(c[0]).includes("Station does NOT enforce CSRF"),
-			);
-			expect(csrfCall).toBeDefined();
-		} finally {
-			warn.mockRestore();
-		}
-	});
+	// ─── 57.6 CSRF fail-close (replaces the removed boot-time warn-once) ──
+	//
+	// Every admin write route refuses to mutate unless blackhole reported a
+	// CSRF-verified request (`ctx.request.csrfProtected === true`). The guard is
+	// the FIRST statement — before auth/DB work — so a forged request never
+	// touches the repo or leaks a 404-vs-403 oracle. The mandatory negative case
+	// (Epic-54-retro DNR: a security default MUST have a fail-closed test) asserts
+	// 403 + the repo was never called. `undefined` (middleware unwired) and
+	// `false` (csrf off / route excepted) are treated identically via `!== true`.
+	describe("57.6 CSRF fail-close on write routes", () => {
+		beforeEach(() => {
+			resetStationProviderFlags();
+		});
 
-	it("CSRF warn-once stays silent when only read-only actions are mounted", async () => {
-		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-		try {
-			const { db } = buildFakeDb();
-			await bootStation({
+		it("POST create with csrfProtected=false → 403 and repo untouched", async () => {
+			const { db, rows, calls } = buildFakeDb();
+			const { routes } = await bootStation({
 				db,
-				resources: [{ entity: User, actions: ["list", "show"] }],
+				resources: [{ entity: User }],
 			});
-			const csrfCall = warn.mock.calls.find((c) =>
-				String(c[0]).includes("Station does NOT enforce CSRF"),
-			);
-			expect(csrfCall).toBeUndefined();
-		} finally {
-			warn.mockRestore();
-		}
+			const create = findRoute(routes, "post", "/admin/users");
+			const { ctx, res } = buildCtx({
+				body: { name: "Mallory", age: 40 },
+				csrfProtected: false,
+			});
+			await create.handler(ctx);
+			expect(res.status).toBe(403);
+			expect(rows.size).toBe(0);
+			expect(calls).toHaveLength(0);
+		});
+
+		it("POST create with csrfProtected undefined (middleware unwired) → 403", async () => {
+			const { db, rows } = buildFakeDb();
+			const { routes } = await bootStation({
+				db,
+				resources: [{ entity: User }],
+			});
+			const create = findRoute(routes, "post", "/admin/users");
+			const { ctx, res } = buildCtx({ body: { name: "x", age: 1 } });
+			// Force the unwired shape: no csrfProtected on the request at all.
+			ctx.request.csrfProtected = undefined;
+			await create.handler(ctx);
+			expect(res.status).toBe(403);
+			expect(rows.size).toBe(0);
+		});
+
+		it("POST create with csrfProtected=true proceeds (guard does not over-block)", async () => {
+			const { db, rows } = buildFakeDb();
+			const { routes } = await bootStation({
+				db,
+				resources: [{ entity: User }],
+			});
+			const create = findRoute(routes, "post", "/admin/users");
+			const { ctx, res } = buildCtx({
+				body: { name: "Alice", age: 30 },
+				csrfProtected: true,
+			});
+			await create.handler(ctx);
+			expect(res.status).toBe(302);
+			expect(rows.size).toBe(1);
+		});
+
+		it("PUT update with csrfProtected=false → 403 and row untouched", async () => {
+			const { db, rows, calls } = buildFakeDb();
+			rows.set(7, { id: 7, name: "Original", age: 5 });
+			const { routes } = await bootStation({
+				db,
+				resources: [{ entity: User }],
+			});
+			const update = findRoute(routes, "put", "/admin/users/:id");
+			const { ctx, res } = buildCtx({
+				params: { id: "7" },
+				body: { name: "Hacked", age: 99 },
+				csrfProtected: false,
+			});
+			await update.handler(ctx);
+			expect(res.status).toBe(403);
+			expect(rows.get(7)?.name).toBe("Original");
+			expect(calls).toHaveLength(0);
+		});
+
+		it("DELETE destroy with csrfProtected=false → 403 and row survives", async () => {
+			const { db, rows, calls } = buildFakeDb();
+			rows.set(7, { id: 7, name: "Keep", age: 5 });
+			const { routes } = await bootStation({
+				db,
+				resources: [{ entity: User }],
+			});
+			const destroy = findRoute(routes, "delete", "/admin/users/:id");
+			const { ctx, res } = buildCtx({
+				params: { id: "7" },
+				csrfProtected: false,
+			});
+			await destroy.handler(ctx);
+			expect(res.status).toBe(403);
+			expect(rows.get(7)).toBeDefined();
+			expect(calls).toHaveLength(0);
+		});
+
+		it("POST method-override (_method=PUT) inherits the guard transitively → 403", async () => {
+			const { db, rows, calls } = buildFakeDb();
+			rows.set(7, { id: 7, name: "Original", age: 5 });
+			const { routes } = await bootStation({
+				db,
+				resources: [{ entity: User }],
+			});
+			const override = findRoute(routes, "post", "/admin/users/:id");
+			const { ctx, res } = buildCtx({
+				params: { id: "7" },
+				body: { _method: "PUT", name: "Hacked", age: 99 },
+				csrfProtected: false,
+			});
+			await override.handler(ctx);
+			expect(res.status).toBe(403);
+			expect(rows.get(7)?.name).toBe("Original");
+			expect(calls).toHaveLength(0);
+		});
+
+		// (login-post + logout CSRF fail-close live in auth-login-surface.test.ts,
+		// where the auth manager is wired so those routes actually mount.)
+
+		it("denyCsrf negotiates JSON and returns the CSRF_REQUIRED code for an XHR/JSON caller", async () => {
+			const { db } = buildFakeDb();
+			const { routes } = await bootStation({
+				db,
+				resources: [{ entity: User }],
+			});
+			const create = findRoute(routes, "post", "/admin/users");
+			const { ctx, res } = buildCtx({
+				body: { name: "x", age: 1 },
+				headers: { accept: "application/json" },
+				csrfProtected: false,
+			});
+			await create.handler(ctx);
+			expect(res.status).toBe(403);
+			expect(res.contentType).toBe("application/json");
+			const parsed = JSON.parse(res.body ?? "{}");
+			expect(parsed.code).toBe("CSRF_REQUIRED");
+		});
+
+		it("logs one console.error on the first blocked write per process", async () => {
+			const err = vi.spyOn(console, "error").mockImplementation(() => {});
+			try {
+				const { db } = buildFakeDb();
+				const { routes } = await bootStation({
+					db,
+					resources: [{ entity: User }],
+				});
+				const create = findRoute(routes, "post", "/admin/users");
+				const a = buildCtx({
+					body: { name: "x", age: 1 },
+					csrfProtected: false,
+				});
+				const b = buildCtx({
+					body: { name: "y", age: 2 },
+					csrfProtected: false,
+				});
+				await create.handler(a.ctx);
+				await create.handler(b.ctx);
+				const csrfErrors = err.mock.calls.filter((c) =>
+					String(c[0]).includes("CSRF was not enforced"),
+				);
+				expect(csrfErrors).toHaveLength(1);
+			} finally {
+				err.mockRestore();
+			}
+		});
 	});
 
 	it("audit snapshots are deep-cloned — mutating before/after in the sink does not touch the live entity", async () => {
