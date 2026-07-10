@@ -27,6 +27,7 @@
     "@c9up/atlas": "^0.1.0",
     "@c9up/inker": "^0.1.0",
     "@c9up/ream": "^0.1.0",
+    "@c9up/rune": "^0.1.0",
     "@c9up/warden": "^0.1.0"
   },
   "peerDependenciesMeta": {
@@ -39,6 +40,9 @@
     "@c9up/ream": {
       "optional": true
     },
+    "@c9up/rune": {
+      "optional": true
+    },
     "@c9up/warden": {
       "optional": true
     }
@@ -46,6 +50,7 @@
   "devDependencies": {
     "@c9up/atlas": "^0.1.0",
     "@c9up/inker": "^0.1.0",
+    "@c9up/rune": "^0.1.0",
     "@types/node": "^22.19.15",
     "@vitest/coverage-v8": "^4.1.2",
     "reflect-metadata": "^0.2.2",

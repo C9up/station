@@ -37,6 +37,7 @@ import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
 	isModuleNotFound,
 	resetStationProviderFlags,
+	resourcesNeedValidation,
 	type StationAppContext,
 	type StationConfig,
 } from "../../src/StationProvider.js";
@@ -295,6 +296,41 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			captureRoutes(app);
 
 			await expect(provider.start()).resolves.toBeUndefined();
+		});
+	});
+
+	describe("rune required for write admins (57.7, AC7 fail-closed decision)", () => {
+		// rune is consumed via the SAME tolerant dynamic import as atlas, so its
+		// ABSENCE cannot be simulated through start() inside vitest (see this
+		// file's header — the dynamic-import-not-found path isn't reproducible).
+		// The boot decision "is rune REQUIRED?" is therefore isolated in the pure
+		// `resourcesNeedValidation` predicate and pinned directly here — mirroring
+		// how the atlas-absent branch is covered by `isModuleNotFound`. start()
+		// throws the loud install-@c9up/rune error iff this predicate is true and
+		// the dynamic import returned null.
+		it("a write-capable resource (create/edit) requires rune", () => {
+			const write = defineResource({ entity: User }); // defaults include create+edit
+			expect(resourcesNeedValidation([write])).toBe(true);
+		});
+
+		it("a read-only resource (list/show) does NOT require rune", () => {
+			const readOnly = defineResource({
+				entity: User,
+				actions: ["list", "show"],
+			});
+			expect(resourcesNeedValidation([readOnly])).toBe(false);
+		});
+
+		it("destroy-only does NOT require rune (no request body maps onto columns)", () => {
+			const destroyOnly = defineResource({
+				entity: User,
+				actions: ["list", "destroy"],
+			});
+			expect(resourcesNeedValidation([destroyOnly])).toBe(false);
+		});
+
+		it("no resources ⇒ rune not required", () => {
+			expect(resourcesNeedValidation([])).toBe(false);
 		});
 	});
 

@@ -1,12 +1,14 @@
 import "reflect-metadata";
 import type { ColumnMetadata } from "@c9up/atlas";
+import { rules, schema } from "@c9up/rune";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	filterWritableBody,
+	deriveWritableSchema,
 	resetStationProviderFlags,
 	type StationAppContext,
+	validateWritableBody,
 } from "../../src/StationProvider.js";
 import { getStation } from "../../src/services/main.js";
 import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
@@ -165,26 +167,143 @@ describe("station > StationProvider > lifecycle", () => {
 	});
 });
 
-// Audit 2026-06-13: an unchecked checkbox submits nothing, so a boolean column
-// could never be cleared to false on edit, and a checked box stored the raw "1".
-describe("station > filterWritableBody — checkbox/boolean coercion", () => {
+// 57.7 — the rune-derived writable schema replaces the hand-rolled
+// filterWritableBody. These pin the coercion CRUX (Task 1 spike, formalised):
+// rune does NOT coerce, so the derivation adds `.parse` for numbers/booleans,
+// and the handler default-fills an absent checkbox to false. Uses the REAL
+// @c9up/rune (tests may import it statically — the src-only static-import guard
+// does not scan tests/).
+describe("station > deriveWritableSchema + validateWritableBody (mass-assignment + coercion)", () => {
+	const rune = { schema, rules };
+	// id → PK (excluded); createdAt → timestamp (excluded); name → required
+	// string; age → optional number; active → boolean checkbox.
 	const columns: ColumnMetadata[] = [
+		{ propertyKey: "id" },
 		{ propertyKey: "name", type: "string" },
+		{ propertyKey: "age", type: "integer", nullable: true },
 		{ propertyKey: "active", type: "boolean" },
+		{ propertyKey: "createdAt", type: "timestamp" },
 	];
+	const build = () =>
+		deriveWritableSchema(columns, "id", new Set(), new Set(), rune);
 
-	it("clears a boolean to false when the checkbox is unchecked (absent from body)", () => {
-		const out = filterWritableBody({ name: "x" }, columns, "id", new Set());
-		expect(out).toEqual({ name: "x", active: false });
+	it("names the boolean columns (checkbox default-fill set)", () => {
+		expect([...build().booleanKeys]).toEqual(["active"]);
+	});
+
+	it("clears a boolean to false when the checkbox is unchecked (absent)", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { name: "x" });
+		expect(r.valid).toBe(true);
+		if (r.valid) {
+			expect(r.data.name).toBe("x");
+			expect(r.data.active).toBe(false);
+			expect("age" in r.data).toBe(false);
+		}
 	});
 
 	it("coerces a checked checkbox ('1') to a real boolean true", () => {
-		const out = filterWritableBody(
-			{ name: "x", active: "1" },
-			columns,
-			"id",
-			new Set(),
-		);
-		expect(out).toEqual({ name: "x", active: true });
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { name: "x", active: "1" });
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.active).toBe(true);
+	});
+
+	it("coerces a numeric string '42' to the number 42", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { name: "x", age: "42" });
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.age).toBe(42);
+	});
+
+	it("rejects a non-numeric string for a number column (422 material)", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { name: "x", age: "abc" });
+		expect(r.valid).toBe(false);
+		if (!r.valid) expect(r.errors.some((e) => e.field === "age")).toBe(true);
+	});
+
+	it("drops PK / timestamps / unknown keys (mass-assignment inherent)", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, {
+			name: "x",
+			id: 999,
+			createdAt: "1970-01-01T00:00:00Z",
+			role: "admin",
+			passwordHash: "exfiltrate",
+		});
+		expect(r.valid).toBe(true);
+		if (r.valid) {
+			expect(r.data.name).toBe("x");
+			expect("id" in r.data).toBe(false);
+			expect("createdAt" in r.data).toBe(false);
+			expect("role" in r.data).toBe(false);
+			expect("passwordHash" in r.data).toBe(false);
+		}
+	});
+
+	it("rejects when a required field is missing", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { age: "1" });
+		expect(r.valid).toBe(false);
+		if (!r.valid) expect(r.errors.some((e) => e.field === "name")).toBe(true);
+	});
+});
+
+// 57.7 code-review hardening — coercion edge cases the initial schema missed:
+// blank/null numbers must not fabricate 0, bigint must not lose precision,
+// json columns must accept objects, and a checkbox posted as an array (hidden
+// "0" companion + checked "1") must read as true.
+describe("station > deriveWritableSchema — review hardening (coercion edges)", () => {
+	const rune = { schema, rules };
+	const columns: ColumnMetadata[] = [
+		{ propertyKey: "id" },
+		{ propertyKey: "name", type: "string" },
+		{ propertyKey: "age", type: "integer", nullable: true },
+		{ propertyKey: "active", type: "boolean" },
+		{ propertyKey: "big", type: "bigint", nullable: true },
+		{ propertyKey: "meta", type: "json", nullable: true },
+	];
+	const build = () =>
+		deriveWritableSchema(columns, "id", new Set(), new Set(), rune);
+
+	it("a blank number field becomes null, never a fabricated 0 (P2)", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { name: "x", age: "" });
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.age ?? null).toBe(null);
+	});
+
+	it("an explicit null number stays null, never coerced to 0 (P2)", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, { name: "x", age: null });
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.age).toBe(null);
+	});
+
+	it("a bigint column preserves its exact digits (no Number() precision loss) (P3)", () => {
+		const { schema: s, booleanKeys } = build();
+		const big = "9007199254740993"; // MAX_SAFE_INTEGER + 2
+		const r = validateWritableBody(s, booleanKeys, { name: "x", big });
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.big).toBe(big);
+	});
+
+	it("a json column accepts a structured object, not just a string (P5)", () => {
+		const { schema: s, booleanKeys } = build();
+		const meta = { role: "editor", tags: [1, 2] };
+		const r = validateWritableBody(s, booleanKeys, { name: "x", meta });
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.meta).toEqual(meta);
+	});
+
+	it("a checkbox posted as an array (hidden 0 + checked 1) reads as true (P6)", () => {
+		const { schema: s, booleanKeys } = build();
+		const r = validateWritableBody(s, booleanKeys, {
+			name: "x",
+			active: ["0", "1"],
+		});
+		expect(r.valid).toBe(true);
+		if (r.valid) expect(r.data.active).toBe(true);
 	});
 });

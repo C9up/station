@@ -39,6 +39,38 @@ interface HttpContextLike {
 	response: ResponseRecorder;
 	params: Record<string, string>;
 	auth?: { user?: { id: unknown; [key: string]: unknown }; roles?: string[] };
+	session?: {
+		flash(key: string, value: unknown): void;
+		flashAll(input: Record<string, unknown>): void;
+		flashMessages(): Record<string, unknown>;
+	};
+}
+
+/**
+ * Minimal fake of ream's session flash (57.7). `commit()` simulates the request
+ * boundary — flash written on request N becomes readable (`flashMessages()`) on
+ * request N+1 — so a POST→redirect→GET PRG round-trip can be driven in-process.
+ */
+function makeFlashSession() {
+	let writing: Record<string, unknown> = {};
+	let previous: Record<string, unknown> = {};
+	return {
+		session: {
+			flash(key: string, value: unknown): void {
+				writing[key] = value;
+			},
+			flashAll(input: Record<string, unknown>): void {
+				Object.assign(writing, input);
+			},
+			flashMessages(): Record<string, unknown> {
+				return { ...previous };
+			},
+		},
+		commit(): void {
+			previous = writing;
+			writing = {};
+		},
+	};
 }
 
 class ResponseRecorder {
@@ -97,6 +129,7 @@ function buildCtx(opts: {
 	 * dedicated CSRF-guard tests pass `false`/omit it to prove the fail-close.
 	 */
 	csrfProtected?: boolean;
+	session?: HttpContextLike["session"];
 }): { ctx: HttpContextLike; res: ResponseRecorder } {
 	const res = new ResponseRecorder();
 	const resolvedUser = opts.user === undefined ? ADMIN_USER : opts.user;
@@ -120,6 +153,7 @@ function buildCtx(opts: {
 		}),
 		params: opts.params ?? {},
 		auth: resolvedUser === null ? undefined : { user: resolvedUser },
+		session: opts.session,
 	};
 	return { ctx, res };
 }
@@ -648,6 +682,124 @@ describe("station > security hardening", () => {
 		expect((stored as Record<string, unknown>).role).toBeUndefined();
 		// The PK in the URL still resolves the row — id wasn't overwritten.
 		expect(stored?.id).toBe(7);
+	});
+
+	// ─── 57.7 validation fail-close (rune-derived schema) ────────────────
+	//
+	// The rune-derived schema replaces filterWritableBody: it drops non-column
+	// keys (mass-assignment, above) AND type-checks each field, fail-closing with
+	// a 422 BEFORE any repository write. The negative case is the Epic-54-retro
+	// DNR non-negotiable — a security-adjacent default MUST have a fail-closed
+	// test (Epic 54 shipped one with zero tests and it was exploitable).
+
+	it("fail-closed: a non-numeric value for a number column → 422 AND repo NOT called (create)", async () => {
+		const { db, rows } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const create = findRoute(routes, "post", "/admin/users");
+		// `age` is an integer column; "abc" is not coercible → must 422.
+		const { ctx, res } = buildCtx({ body: { name: "Alice", age: "abc" } });
+		await create.handler(ctx);
+		expect(res.status).toBe(422);
+		// The repository was never touched — nothing was created.
+		expect(rows.size).toBe(0);
+	});
+
+	it("fail-closed: a missing required field → 422 AND repo NOT called (create)", async () => {
+		const { db, rows } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const create = findRoute(routes, "post", "/admin/users");
+		// `name` is required (non-nullable, no default) — omitting it must 422.
+		const { ctx, res } = buildCtx({ body: { age: 30 } });
+		await create.handler(ctx);
+		expect(res.status).toBe(422);
+		expect(rows.size).toBe(0);
+	});
+
+	it("fail-closed: invalid update → 422 AND the row is left unchanged (no setProp/save)", async () => {
+		const { db, rows } = buildFakeDb();
+		rows.set(7, { id: 7, name: "Old", age: 25 });
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const update = findRoute(routes, "put", "/admin/users/:id");
+		const { ctx, res } = buildCtx({
+			params: { id: "7" },
+			body: { name: "New", age: "abc" },
+		});
+		await update.handler(ctx);
+		expect(res.status).toBe(422);
+		const stored = rows.get(7);
+		expect(stored?.name).toBe("Old");
+		expect(stored?.age).toBe(25);
+	});
+
+	it("coercion: a numeric string '42' is accepted and stored as the number 42", async () => {
+		const { db, rows } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const create = findRoute(routes, "post", "/admin/users");
+		const { ctx, res } = buildCtx({ body: { name: "Alice", age: "42" } });
+		await create.handler(ctx);
+		expect(res.status).toBe(302);
+		const stored = [...rows.values()][0];
+		expect(stored.age).toBe(42);
+	});
+
+	it("content negotiation: a JSON request gets a JSON 422 with the AdonisJS { errors } shape", async () => {
+		const { db } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const create = findRoute(routes, "post", "/admin/users");
+		const { ctx, res } = buildCtx({
+			body: { name: "Alice", age: "abc" },
+			headers: { accept: "application/json" },
+		});
+		await create.handler(ctx);
+		expect(res.status).toBe(422);
+		expect(res.contentType).toBe("application/json");
+		// Assert on the raw JSON string (avoids an untyped JSON.parse). AdonisJS/
+		// VineJS parity: `{ errors: [{ field, rule, message }] }`.
+		expect(res.body).toContain('"errors"');
+		expect(res.body).toContain('"field":"age"');
+	});
+
+	it("content negotiation (no session): an HTML request falls back to an inline 422 form re-render", async () => {
+		const { db } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const create = findRoute(routes, "post", "/admin/users");
+		// No session bound → the PRG flash+redirect path can't run, so Station
+		// re-renders inline so the errors are never silently lost.
+		const { ctx, res } = buildCtx({ body: { name: "Alice", age: "abc" } });
+		await create.handler(ctx);
+		expect(res.status).toBe(422);
+		expect(res.contentType).toMatch(/text\/html/);
+		// The invalid value the user typed is echoed back (create stays in create
+		// mode — no row), and a field-level error is shown.
+		expect(res.body).toContain('value="abc"');
+		expect(res.body).toContain("st-field-error");
+	});
+
+	it("content negotiation (session): AdonisJS PRG — flash + redirect back, then the form GET renders values + errors", async () => {
+		const { db, rows } = buildFakeDb();
+		const { routes } = await bootStation({ db, resources: [{ entity: User }] });
+		const create = findRoute(routes, "post", "/admin/users");
+		const newForm = findRoute(routes, "get", "/admin/users/new");
+		const flash = makeFlashSession();
+
+		// 1) POST an invalid body WITH a session → redirect back to the form (302),
+		//    old input + errors flashed, repository untouched (fail-closed).
+		const post = buildCtx({
+			body: { name: "Alice", age: "abc" },
+			session: flash.session,
+		});
+		await create.handler(post.ctx);
+		expect(post.res.status).toBe(302);
+		expect(post.res.location).toBe("/admin/users/new");
+		expect(rows.size).toBe(0);
+
+		// 2) request boundary → flash becomes readable on the next GET.
+		flash.commit();
+		const get = buildCtx({ session: flash.session });
+		await newForm.handler(get.ctx);
+		// The form re-renders with the submitted value echoed + the field error.
+		expect(get.res.body).toContain('value="abc"');
+		expect(get.res.body).toContain("st-field-error");
 	});
 
 	// ─── 57.6 CSRF fail-close (replaces the removed boot-time warn-once) ──

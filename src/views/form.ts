@@ -35,6 +35,15 @@ export interface FormPageInput {
 	pkColumn: string;
 	/** Existing row for edit; undefined for create. */
 	row?: Readonly<Record<string, unknown>>;
+	/**
+	 * Submitted values to repopulate the fields with, INDEPENDENT of `row`
+	 * (57.7). On a 422 re-render the form must echo what the user just typed —
+	 * for a *create* that means field values with NO `row` (so `isEdit` stays
+	 * false and the action URL stays `/admin/<slug>`), and for an *edit* it means
+	 * the submitted values while `row` still supplies the id/action. When absent,
+	 * fields fall back to `row` (the normal create/edit GET render).
+	 */
+	values?: Readonly<Record<string, unknown>>;
 	/** Validation errors keyed by column propertyKey. */
 	errors?: Readonly<Record<string, string>>;
 	/**
@@ -76,7 +85,8 @@ export type FormViewModel = {
 };
 
 export function buildFormViewModel(input: FormPageInput): FormViewModel {
-	const { resource, columns, pkColumn, row, errors, csrfEnabled } = input;
+	const { resource, columns, pkColumn, row, values, errors, csrfEnabled } =
+		input;
 	const isEdit = row !== undefined;
 	const slug = encodeURIComponent(resource.name);
 	const id = isEdit ? String(row[pkColumn] ?? "") : "";
@@ -95,7 +105,9 @@ export function buildFormViewModel(input: FormPageInput): FormViewModel {
 		.filter(
 			(c) => !shouldSkipColumn(c, pkColumn, resource.formFields[c.propertyKey]),
 		)
-		.map((c) => buildField(c, row, errors, resource.formFields[c.propertyKey]));
+		.map((c) =>
+			buildField(c, values ?? row, errors, resource.formFields[c.propertyKey]),
+		);
 
 	return {
 		title: heading,
@@ -111,13 +123,13 @@ export function buildFormViewModel(input: FormPageInput): FormViewModel {
 
 function buildField(
 	c: ColumnMetadata,
-	row: Readonly<Record<string, unknown>> | undefined,
+	source: Readonly<Record<string, unknown>> | undefined,
 	errors: Readonly<Record<string, string>> | undefined,
 	override: FormFieldOverride | undefined,
 ): FormField {
 	const inputType = override?.inputType ?? inferInputType(c);
 	const name = c.propertyKey;
-	const rawValue = row?.[name];
+	const rawValue = source?.[name];
 	const isCheckbox = inputType === "checkbox";
 	const value =
 		rawValue === undefined || rawValue === null ? "" : String(rawValue);
