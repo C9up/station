@@ -287,6 +287,40 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			await expect(provider.start()).rejects.toThrow(/register @c9up\/inker/);
 		});
 
+		it('resources registered + `"inker"` resolves to a non-conforming value ⇒ start() throws the not-usable error, and the runtime guard is what rejected it (57.1 review)', async () => {
+			const app = buildApp({ db: buildMinimalDb(), bindInker: false });
+			// A registered-but-half-wired binding: `has("inker")` is true, but the
+			// resolved value lacks `renderToString`. Must fail loud at boot with the
+			// actionable "not usable" error, NOT a raw TypeError at `renderer.mount`.
+			app.container.singleton("inker", () => ({ mount() {} }));
+			const provider = new StationProvider(app);
+			provider.register();
+			await provider.boot();
+			app.container
+				.resolve<ResourceRegistry>(ResourceRegistry)
+				.register(defineResource({ entity: User }));
+			captureRoutes(app);
+
+			const err: unknown = await provider.start().then(
+				() => {
+					throw new Error("expected start() to reject");
+				},
+				(e) => e,
+			);
+			if (!(err instanceof Error)) {
+				throw new Error("expected start() to reject with an Error");
+			}
+			expect(err.message).toMatch(/not usable/);
+			// The chained cause proves the `isInkerViewRenderer` guard is what
+			// rejected the half-wired binding (missing renderToString) — not an
+			// unrelated resolve failure, and not a raw TypeError surfacing later
+			// at `renderer.mount`.
+			if (!(err.cause instanceof Error)) {
+				throw new Error("expected a chained cause Error from the guard");
+			}
+			expect(err.cause.message).toMatch(/not a usable view renderer/);
+		});
+
 		it("empty registry ⇒ start() returns early, inker never required", async () => {
 			const app = buildApp({ db: buildMinimalDb(), bindInker: false });
 			const provider = new StationProvider(app);

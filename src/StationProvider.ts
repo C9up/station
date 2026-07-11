@@ -311,6 +311,25 @@ interface InkerViewRenderer {
 }
 
 /**
+ * Runtime shape check for the resolved `"inker"` binding. `container.has("inker")`
+ * only proves the token is registered — a null/partial/mis-registered value would
+ * otherwise slip through `#resolveViewRenderer` and blow up as a raw `TypeError`
+ * at `renderer.mount(...)` during boot, defeating the actionable fail-loud gate
+ * (57.1 review). Guarding here turns a null/non-conforming binding into the same
+ * clear "not usable" boot error, with the specific reason chained as `cause`.
+ */
+function isInkerViewRenderer(value: unknown): value is InkerViewRenderer {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"mount" in value &&
+		typeof value.mount === "function" &&
+		"renderToString" in value &&
+		typeof value.renderToString === "function"
+	);
+}
+
+/**
  * Authorization scope (Epic 56). Declared LOCALLY — Station stays
  * agnostic of `@c9up/warden` and never imports its `Scope` type. The
  * shape mirrors warden's `Scope` (`"global" | { tenant }`) structurally
@@ -439,6 +458,25 @@ export function resetStationProviderFlags(): void {
 	missingAuditWarned = false;
 	csrfBlockedWarned = false;
 }
+
+/**
+ * Stable fingerprint for a failed `station::errors/404` render, used to log each
+ * distinct failure MODE once per provider instance rather than once per request.
+ * Keys on the error `code`/`name` ONLY — never the message, which can embed the
+ * request-controlled `id` and would let attacker traffic inflate the log past
+ * the very bound this mechanism exists to hold.
+ */
+function notFoundFailFingerprint(cause: unknown): string {
+	if (!(cause instanceof Error)) return "non-error";
+	if ("code" in cause && typeof cause.code === "string") return cause.code;
+	return cause.name;
+}
+
+/**
+ * Hard cap on distinct 404-render failure modes logged per instance, so an
+ * unforeseen unbounded error-code space still cannot inflate the log or memory.
+ */
+const NOT_FOUND_RENDER_FAIL_CAP = 32;
 
 const TIMESTAMP_PROPERTY_KEYS: ReadonlySet<string> = new Set([
 	"createdAt",
@@ -785,6 +823,11 @@ const TEMPLATES_ROOT = fileURLToPath(new URL("../templates/", import.meta.url));
 export default class StationProvider {
 	#contexts: Map<Resource, ResourceContext> = new Map();
 	#viewRenderer: InkerViewRenderer | undefined;
+	/**
+	 * Distinct 404-render failure modes already logged (fingerprints), scoped
+	 * per instance so one provider's fault never suppresses another's.
+	 */
+	#notFoundRenderFailCauses = new Set<string>();
 	#started = false;
 	// 54.7 auth state — populated when warden is wired AND
 	// StationConfig.requireAuth is true (default when warden is present).
@@ -966,10 +1009,16 @@ export default class StationProvider {
 			);
 		}
 		try {
-			return await this.app.container.resolve<InkerViewRenderer>("inker");
+			const resolved = await this.app.container.resolve<unknown>("inker");
+			if (!isInkerViewRenderer(resolved)) {
+				throw new Error(
+					'the "inker" binding is not a usable view renderer (missing mount/renderToString)',
+				);
+			}
+			return resolved;
 		} catch (cause) {
 			throw new Error(
-				"[station] @c9up/inker is registered but not ready — ensure InkerProvider (and its rosetta/router peers) boots before Station",
+				"[station] @c9up/inker is registered but not usable — it must fully boot (InkerProvider + its rosetta/router peers) before Station, and resolve to a real view renderer. See `cause` for the specific reason.",
 				{ cause },
 			);
 		}
@@ -1010,11 +1059,29 @@ export default class StationProvider {
 					slug: encodeURIComponent(resource.name),
 				},
 			);
-		} catch {
+		} catch (cause) {
 			// The error page itself failed to render (missing/faulty template,
 			// fs fault, parse error). A not-found must never escalate into a 500:
 			// fall back to a minimal, dependency-free static body. `id` is
-			// request-controlled, so it is HTML-escaped here.
+			// request-controlled, so it is HTML-escaped here. The fault is logged
+			// so a persistent deploy misconfig (unpublished templates/, corrupt
+			// station::layout) is not silently swallowed — but once per failure
+			// MODE per instance, not once per request: a durably-broken template
+			// on a 404-sprayed endpoint must not turn attacker traffic into
+			// unbounded log volume, while a genuinely new failure mode still
+			// surfaces its `cause`. The fingerprint keys on code/name only (never
+			// the request-controlled message) and is capped, so both stay bounded.
+			const fingerprint = notFoundFailFingerprint(cause);
+			if (
+				this.#notFoundRenderFailCauses.size < NOT_FOUND_RENDER_FAIL_CAP &&
+				!this.#notFoundRenderFailCauses.has(fingerprint)
+			) {
+				this.#notFoundRenderFailCauses.add(fingerprint);
+				console.error(
+					`[station] failed to render station::errors/404 (${fingerprint}) — serving the minimal fallback page; repeats of this failure mode are suppressed this instance`,
+					cause,
+				);
+			}
 			return `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Not Found</title></head><body><h1>404 — Not Found</h1><p>No ${escapeMin(resource.label)} matches <code>${escapeMin(id)}</code>.</p></body></html>`;
 		}
 	}
