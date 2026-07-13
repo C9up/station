@@ -109,11 +109,11 @@ async function bootShowRoute(
 			singleton(token, factory) {
 				bindings.set(token, bypassTypeCheck<() => unknown>(factory));
 			},
-			resolve<T>(token: unknown): T {
+			async resolve<T>(token: unknown): Promise<T> {
 				if (cache.has(token)) return bypassTypeCheck<T>(cache.get(token));
 				const factory = bindings.get(token);
 				if (!factory) throw new Error(`not registered: ${String(token)}`);
-				const value = factory();
+				const value = await factory();
 				cache.set(token, value);
 				return bypassTypeCheck<T>(value);
 			},
@@ -130,9 +130,9 @@ async function bootShowRoute(
 	const provider = new StationProvider(app);
 	provider.register();
 	await provider.boot();
-	app.container
-		.resolve<ResourceRegistry>(ResourceRegistry)
-		.register(defineResource({ entity: User }));
+	(await app.container.resolve<ResourceRegistry>(ResourceRegistry)).register(
+		defineResource({ entity: User }),
+	);
 	await provider.start();
 	const show = routes.find(
 		(r) => r.method === "get" && r.path === "/admin/users/:id",

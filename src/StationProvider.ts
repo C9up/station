@@ -42,7 +42,7 @@ import { buildShowViewModel } from "./views/show.js";
  */
 interface StationContainer {
 	singleton<T>(key: unknown, factory: () => T): void;
-	resolve<T>(key: unknown): T;
+	resolve<T>(key: unknown): Promise<T>;
 	has(key: unknown): boolean;
 }
 
@@ -858,14 +858,14 @@ export default class StationProvider {
 	async boot(): Promise<void> {
 		// Force-resolve so `setStation` runs even if no preload touches the
 		// singleton. Mirrors AuroraProvider.boot().
-		this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
 	}
 
 	async start(): Promise<void> {
 		if (this.#started) return;
 
 		const registry =
-			this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+			await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
 		const resources = registry.all();
 		if (resources.length === 0) return;
 
@@ -906,13 +906,13 @@ export default class StationProvider {
 		this.#viewRenderer = renderer;
 
 		// Phase 1b — wire the warden auth gate (or warn-once when it stays open).
-		this.#configureAuth(userConfig);
+		await this.#configureAuth(userConfig);
 
 		// Phase 2 — build per-resource context ONCE. `#resolveDb()` is
 		// loud: if the host installed `@c9up/atlas` but didn't register
 		// `@c9up/atlas/provider` in `reamrc.ts`, AC11's "surface
 		// AtlasProvider misconfiguration" intent kicks in.
-		const db = this.#resolveDb();
+		const db = await this.#resolveDb();
 		for (const resource of resources) {
 			this.#contexts.set(
 				resource,
@@ -961,7 +961,7 @@ export default class StationProvider {
 		rune: RuneModule | null;
 	} | null> {
 		if (!this.app.container.has("router")) return null;
-		const router = this.app.container.resolve<StationRouter>("router");
+		const router = await this.app.container.resolve<StationRouter>("router");
 		try {
 			const atlas = loadBearingCast<AtlasModule>(await import("@c9up/atlas"));
 			// rune is loaded here but its ABSENCE is NOT a degraded-host signal the
@@ -1123,12 +1123,12 @@ export default class StationProvider {
 	 * Wire the warden auth gate from the `station` config block. When warden is
 	 * not installed/bound the gate stays open and a one-time warning is emitted.
 	 */
-	#configureAuth(userConfig: StationConfig): void {
+	async #configureAuth(userConfig: StationConfig): Promise<void> {
 		const wardenWanted = userConfig.requireAuth !== false;
 		if (wardenWanted) {
 			try {
 				this.#authManager =
-					this.app.container.resolve<WardenAuthManager>("auth");
+					await this.app.container.resolve<WardenAuthManager>("auth");
 				this.#authConfig = {
 					requireAuth: true,
 					requireRole: userConfig.requireRole,
@@ -1725,9 +1725,9 @@ export default class StationProvider {
 		};
 	}
 
-	#resolveDb(): unknown {
+	async #resolveDb(): Promise<unknown> {
 		try {
-			return this.app.container.resolve<unknown>("db");
+			return await this.app.container.resolve<unknown>("db");
 		} catch (cause) {
 			throw new Error(
 				`[station] No 'db' connection registered. Did you register @c9up/atlas/provider in reamrc.ts?`,

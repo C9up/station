@@ -178,11 +178,11 @@ function buildApp(db: unknown, router: unknown): StationAppContext {
 			singleton(token, factory) {
 				bindings.set(token, bypassTypeCheck<() => unknown>(factory));
 			},
-			resolve<T>(token: unknown): T {
+			async resolve<T>(token: unknown): Promise<T> {
 				if (cache.has(token)) return bypassTypeCheck<T>(cache.get(token));
 				const factory = bindings.get(token);
 				if (!factory) throw new Error(`not registered: ${String(token)}`);
-				const value = factory();
+				const value = await factory();
 				cache.set(token, value);
 				return bypassTypeCheck<T>(value);
 			},
@@ -229,7 +229,8 @@ async function bootStation(opts: {
 	const provider = new StationProvider(app);
 	provider.register();
 	await provider.boot();
-	const registry = app.container.resolve<ResourceRegistry>(ResourceRegistry);
+	const registry =
+		await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 	for (const opt of opts.resources) registry.register(defineResource(opt));
 	await provider.start();
 

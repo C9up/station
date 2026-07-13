@@ -52,12 +52,12 @@ function makeApp(opts?: { router?: unknown }): {
 			singleton(token, factory) {
 				bindings.set(token, factory as () => unknown);
 			},
-			resolve<T>(token: unknown): T {
+			async resolve<T>(token: unknown): Promise<T> {
 				resolved.push(token);
 				if (cache.has(token)) return cache.get(token) as T;
 				const factory = bindings.get(token);
 				if (!factory) throw new Error(`not registered: ${String(token)}`);
-				const value = factory();
+				const value = await factory();
 				cache.set(token, value);
 				return value as T;
 			},
@@ -79,13 +79,14 @@ describe("station > StationProvider > lifecycle", () => {
 		resetStationProviderFlags();
 	});
 
-	it("register() binds ResourceRegistry + 'station' alias, both pointing at the same singleton", () => {
+	it("register() binds ResourceRegistry + 'station' alias, both pointing at the same singleton", async () => {
 		const { app, bindings } = makeApp();
 		new StationProvider(app).register();
 		expect(bindings.has(ResourceRegistry)).toBe(true);
 		expect(bindings.has("station")).toBe(true);
-		const byClass = app.container.resolve<ResourceRegistry>(ResourceRegistry);
-		const byAlias = app.container.resolve<ResourceRegistry>("station");
+		const byClass =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		const byAlias = await app.container.resolve<ResourceRegistry>("station");
 		expect(byClass).toBeInstanceOf(ResourceRegistry);
 		expect(byAlias).toBe(byClass);
 	});
@@ -95,7 +96,8 @@ describe("station > StationProvider > lifecycle", () => {
 		const provider = new StationProvider(app);
 		provider.register();
 		await provider.boot();
-		const direct = app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		const direct =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 		expect(getStation()).toBe(direct);
 	});
 
@@ -128,7 +130,8 @@ describe("station > StationProvider > lifecycle", () => {
 		const provider = new StationProvider(app);
 		provider.register();
 		await provider.boot();
-		const registry = app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		const registry =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 		registry.register(defineResource({ entity: User }));
 
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -155,7 +158,8 @@ describe("station > StationProvider > lifecycle", () => {
 		const provider = new StationProvider(app);
 		provider.register();
 		await provider.boot();
-		const registry = app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		const registry =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 		registry.register(defineResource({ entity: User }));
 
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});

@@ -71,11 +71,11 @@ function buildApp(opts: {
 			singleton(token, factory) {
 				bindings.set(token, bypassTypeCheck<() => unknown>(factory));
 			},
-			resolve<T>(token: unknown): T {
+			async resolve<T>(token: unknown): Promise<T> {
 				if (cache.has(token)) return bypassTypeCheck<T>(cache.get(token));
 				const factory = bindings.get(token);
 				if (!factory) throw new Error(`not registered: ${String(token)}`);
-				const value = factory();
+				const value = await factory();
 				cache.set(token, value);
 				return bypassTypeCheck<T>(value);
 			},
@@ -182,7 +182,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 				provider.register();
 				await provider.boot();
 				const registry =
-					app.container.resolve<ResourceRegistry>(ResourceRegistry);
+					await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 				registry.register(defineResource({ entity: User }));
 
 				const { calls } = captureRoutes(app);
@@ -215,7 +215,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			});
 			// Wrap resolve to record what was asked for.
 			const originalResolve = app.container.resolve.bind(app.container);
-			app.container.resolve = <T>(token: unknown): T => {
+			app.container.resolve = <T>(token: unknown): Promise<T> => {
 				resolveCalls.push(token);
 				return originalResolve<T>(token);
 			};
@@ -223,7 +223,8 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			const provider = new StationProvider(app);
 			provider.register();
 			await provider.boot();
-			const registry = originalResolve<ResourceRegistry>(ResourceRegistry);
+			const registry =
+				await originalResolve<ResourceRegistry>(ResourceRegistry);
 			registry.register(defineResource({ entity: User }));
 
 			// Reset the recorder to capture only start()'s lookups.
@@ -246,7 +247,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			const app: StationAppContext = {
 				container: {
 					singleton: () => {},
-					resolve<T>(token: unknown): T {
+					async resolve<T>(token: unknown): Promise<T> {
 						if (token === "db") dbResolved = true;
 						if (token === "station" || token === ResourceRegistry) {
 							return bypassTypeCheck<T>(new ResourceRegistry());
@@ -279,9 +280,9 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			const provider = new StationProvider(app);
 			provider.register();
 			await provider.boot();
-			app.container
-				.resolve<ResourceRegistry>(ResourceRegistry)
-				.register(defineResource({ entity: User }));
+			(
+				await app.container.resolve<ResourceRegistry>(ResourceRegistry)
+			).register(defineResource({ entity: User }));
 			captureRoutes(app);
 
 			await expect(provider.start()).rejects.toThrow(/register @c9up\/inker/);
@@ -296,9 +297,9 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			const provider = new StationProvider(app);
 			provider.register();
 			await provider.boot();
-			app.container
-				.resolve<ResourceRegistry>(ResourceRegistry)
-				.register(defineResource({ entity: User }));
+			(
+				await app.container.resolve<ResourceRegistry>(ResourceRegistry)
+			).register(defineResource({ entity: User }));
 			captureRoutes(app);
 
 			const err: unknown = await provider.start().then(
