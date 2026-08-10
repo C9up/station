@@ -206,7 +206,7 @@ interface ResourceContext {
 	/**
 	 * The `@c9up/rune` validation schema derived once (57.7) from the entity's
 	 * writable column metadata — replaces the hand-rolled `filterWritableBody`.
-	 * `validate()` both drops non-schema keys (the mass-assignment guarantee is
+	 * `validateResult()` both drops non-schema keys (the mass-assignment guarantee is
 	 * now inherent — `result.data` holds only declared columns) AND type-checks
 	 * each field. Built only when a write action is mounted (create/edit); a
 	 * read-only resource leaves it `undefined`. `booleanKeys` names the checkbox
@@ -265,7 +265,7 @@ interface RuneValidationError {
 	meta?: Record<string, unknown>;
 }
 
-/** Result of `schema.validate()` — synchronous, never throws. */
+/** Result of `schema.validateResult()` — synchronous, never throws. */
 type RuneValidationResult =
 	| {
 			valid: true;
@@ -278,9 +278,16 @@ type RuneValidationResult =
 			data?: undefined;
 	  };
 
-/** A built rune schema — only `validate` is consumed. */
+/**
+ * A built rune schema — only the result-based check is consumed.
+ *
+ * `validateResult`, NOT `validate`: rune reserves `validate()` for the VineJS
+ * contract (async, throwing). Reading `.valid` off a Promise gives `undefined`,
+ * so keeping the old name would have made every admin write fail closed with an
+ * empty error list.
+ */
 interface RuneSchema {
-	validate(data: unknown): RuneValidationResult;
+	validateResult(data: unknown): RuneValidationResult;
 }
 
 /** Lazy-imported `@c9up/rune` value surface (mirror `AtlasModule`). */
@@ -524,7 +531,7 @@ export function resourcesNeedValidation(
  * Derive a `@c9up/rune` validation schema (57.7) from an entity's writable
  * column metadata — the structural replacement for the hand-rolled
  * `filterWritableBody`. The mass-assignment guarantee is now INHERENT:
- * `schema.validate()` returns only declared-column keys, so unknown body keys
+ * `schema.validateResult()` returns only declared-column keys, so unknown body keys
  * (`role`, `passwordHash`, PK, timestamps) are dropped automatically — no
  * explicit filtering pass.
  *
@@ -593,7 +600,7 @@ export function deriveWritableSchema(
  * Validate a request body against a derived schema (57.7). Default-fills any
  * ABSENT boolean column to `false` first (unchecked checkbox = no submission),
  * preserving the old `filterWritableBody` checkbox semantics, then runs rune's
- * synchronous, never-throwing `validate()`. On success `result.data` holds only
+ * synchronous, never-throwing `validateResult()`. On success `result.data` holds only
  * declared-column keys (mass-assignment inherent). Exported for the unit tests
  * that pin the coercion CRUX.
  */
@@ -606,7 +613,7 @@ export function validateWritableBody(
 	for (const key of booleanKeys) {
 		if (!(key in input)) input[key] = false;
 	}
-	return schema.validate(input);
+	return schema.validateResult(input);
 }
 
 /**
