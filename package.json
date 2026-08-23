@@ -1,7 +1,7 @@
 {
   "name": "@c9up/station",
   "version": "0.1.7",
-  "description": "Station — admin scaffolding for the Ream framework. Declarative resource catalogue (defineResource) backing list/show/create/edit/destroy routes, audit, policies.",
+  "description": "Station \u2014 admin scaffolding for the Ream framework. Declarative resource catalogue (defineResource) backing list/show/create/edit/destroy routes, audit, policies.",
   "license": "MIT",
   "type": "module",
   "main": "./src/index.ts",
@@ -33,7 +33,7 @@
     "@c9up/atlas": "^0.1.0",
     "@c9up/inker": "^0.1.0",
     "@c9up/ream": "^0.1.0",
-    "@c9up/rune": "^0.1.0",
+    "@c9up/rune": "^0.1.8",
     "@c9up/warden": "^0.1.0"
   },
   "peerDependenciesMeta": {
@@ -57,7 +57,7 @@
     "@biomejs/biome": "^2.4.10",
     "@c9up/atlas": "^0.1.0",
     "@c9up/inker": "^0.1.0",
-    "@c9up/rune": "^0.1.0",
+    "@c9up/rune": "^0.1.8",
     "@types/node": "^22.19.15",
     "@vitest/coverage-v8": "^4.1.2",
     "reflect-metadata": "^0.2.2",
