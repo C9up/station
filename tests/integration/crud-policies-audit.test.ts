@@ -42,13 +42,13 @@ interface HttpContextLike {
 	session?: {
 		flash(key: string, value: unknown): void;
 		flashAll(input: Record<string, unknown>): void;
-		flashMessages(): Record<string, unknown>;
+		flashMessages: { all(): Record<string, unknown> };
 	};
 }
 
 /**
  * Minimal fake of ream's session flash (57.7). `commit()` simulates the request
- * boundary — flash written on request N becomes readable (`flashMessages()`) on
+ * boundary — flash written on request N becomes readable (`flashMessages`) on
  * request N+1 — so a POST→redirect→GET PRG round-trip can be driven in-process.
  */
 function makeFlashSession() {
@@ -62,8 +62,11 @@ function makeFlashSession() {
 			flashAll(input: Record<string, unknown>): void {
 				Object.assign(writing, input);
 			},
-			flashMessages(): Record<string, unknown> {
-				return { ...previous };
+			// A store, as ream now exposes it — the provider reads `.all()`.
+			flashMessages: {
+				all(): Record<string, unknown> {
+					return { ...previous };
+				},
 			},
 		},
 		commit(): void {

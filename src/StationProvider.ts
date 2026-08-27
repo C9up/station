@@ -119,14 +119,18 @@ interface StationHttpContext {
 	 * The request session, when the host registered ream's `SessionMiddleware`
 	 * (`ctx.session`, AdonisJS parity). Station uses only the flash surface (57.7):
 	 * on an invalid HTML write it flashes the old input + errors and redirects
-	 * back to the form, which reads them back via `flashMessages()`. Undefined
+	 * back to the form, which reads them back via `flashMessages`. Undefined
 	 * when no session middleware ran — Station then falls back to an inline 422
 	 * form re-render (no session ⇒ no flash round-trip possible).
 	 */
 	session?: {
 		flash(key: string, value: unknown): void;
 		flashAll(input: Record<string, unknown>): void;
-		flashMessages(): Record<string, unknown>;
+		/**
+		 * A store, not a method — the AdonisJS shape ream now matches. Only
+		 * `all()` is needed here, so that is all the structural type asks for.
+		 */
+		flashMessages: { all(): Record<string, unknown> };
 	};
 }
 
@@ -703,7 +707,7 @@ function readFlash(
 	values?: Record<string, unknown>;
 	errors?: Record<string, string>;
 } {
-	const flashed = ctx.session?.flashMessages() ?? {};
+	const flashed = ctx.session?.flashMessages.all() ?? {};
 	if (Object.keys(flashed).length === 0) return {};
 	const values: Record<string, unknown> = {};
 	for (const c of columns) {
