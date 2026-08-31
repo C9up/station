@@ -927,7 +927,7 @@ describe("station > security hardening", () => {
 		// (login-post + logout CSRF fail-close live in auth-login-surface.test.ts,
 		// where the auth manager is wired so those routes actually mount.)
 
-		it("denyCsrf negotiates JSON and returns the CSRF_REQUIRED code for an XHR/JSON caller", async () => {
+		it("denyCsrf negotiates JSON and returns the E_STATION_CSRF_REQUIRED code for an XHR/JSON caller", async () => {
 			const { db } = buildFakeDb();
 			const { routes } = await bootStation({
 				db,
@@ -943,7 +943,7 @@ describe("station > security hardening", () => {
 			expect(res.status).toBe(403);
 			expect(res.contentType).toBe("application/json");
 			const parsed = JSON.parse(res.body ?? "{}");
-			expect(parsed.code).toBe("CSRF_REQUIRED");
+			expect(parsed.code).toBe("E_STATION_CSRF_REQUIRED");
 		});
 
 		it("logs one console.error on the first blocked write per process", async () => {

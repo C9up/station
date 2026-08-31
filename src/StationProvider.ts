@@ -2242,7 +2242,7 @@ function denyCsrf(ctx: StationHttpContext): void {
 	if (wantsJsonResponse(ctx)) {
 		ctx.response.json({
 			error: "Forbidden",
-			code: "CSRF_REQUIRED",
+			code: "E_STATION_CSRF_REQUIRED",
 			message: "This admin action requires an active, verified CSRF token.",
 		});
 		return;

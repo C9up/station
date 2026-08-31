@@ -85,7 +85,12 @@ describe("station > views > buildListViewModel", () => {
 		expect(vm.pager.prev.disabled).toBe(true);
 		expect(vm.pager.next.disabled).toBe(true);
 		expect(vm.pager.pages).toEqual([
-			{ n: 1, href: "/admin/users?page=1&perPage=25", isCurrent: true, isEllipsis: false },
+			{
+				n: 1,
+				href: "/admin/users?page=1&perPage=25",
+				isCurrent: true,
+				isEllipsis: false,
+			},
 		]);
 	});
 
