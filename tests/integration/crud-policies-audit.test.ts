@@ -24,7 +24,6 @@ function defined<T>(value: T | null | undefined): T {
 	return value;
 }
 
-
 // ─── Test infra ──────────────────────────────────────────────
 
 interface CapturedRoute {
@@ -187,9 +186,9 @@ function buildFakeDb() {
 			// UPDATE "users" SET "name" = ?, "age" = ? WHERE "id" = ?
 			const setMatch = sql.match(/SET\s+(.+?)\s+WHERE/i);
 			if (!setMatch) return { rowsAffected: 0 };
-			const setCols = (setMatch[1] ?? "").split(",").map((s) =>
-				(s.trim().split(/\s*=\s*/)[0] ?? "").replace(/"/g, ""),
-			);
+			const setCols = (setMatch[1] ?? "")
+				.split(",")
+				.map((s) => (s.trim().split(/\s*=\s*/)[0] ?? "").replace(/"/g, ""));
 			const whereVal = Number(params[params.length - 1]);
 			const row = rows.get(whereVal);
 			if (!row) return { rowsAffected: 0 };
@@ -1116,8 +1115,12 @@ describe("station > 54.6 audit trail", () => {
 			// The audit failure is logged at error level (observable by
 			// monitoring), tagged COMPLIANCE GAP, naming the sink error.
 			expect(error).toHaveBeenCalledTimes(1);
-			expect(String(defined(error.mock.calls[0])[0])).toContain("COMPLIANCE GAP");
-			expect(String(defined(error.mock.calls[0])[0])).toContain("audit pipeline down");
+			expect(String(defined(error.mock.calls[0])[0])).toContain(
+				"COMPLIANCE GAP",
+			);
+			expect(String(defined(error.mock.calls[0])[0])).toContain(
+				"audit pipeline down",
+			);
 		} finally {
 			error.mockRestore();
 		}
