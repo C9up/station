@@ -655,7 +655,7 @@ function fieldErrors(
 		// Collapse a nested VineJS-style path (`profile.name`) to its top-level
 		// key — `form.ts` keys errors by column propertyKey. `split` always yields
 		// a non-empty array, so `[0]` is a string (no fallback needed).
-		const key = e.field.split(".")[0];
+		const [key = e.field] = e.field.split(".");
 		if (!(key in out)) out[key] = e.message;
 	}
 	return out;
@@ -1257,7 +1257,8 @@ export default class StationProvider {
 		if (this.#authManager === undefined) return;
 		if (resources.length === 0) return;
 		seedPermsWarned = true;
-		const example = resources[0];
+		const [example] = resources;
+		if (example === undefined) return;
 		console.warn(
 			`[station] Admin actions are gated behind '<resource>.<action>' permissions resolved through @c9up/warden (e.g. '${example.name}.list', '${example.name}.create'). Seed roles/grants in the Warden rights store (store.defineRole('admin', ['${example.name}.list', '${example.name}.create', ...]) then assignRole) or every admin request will 403. See https://ream.dev/modules/station#authorization.`,
 		);

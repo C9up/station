@@ -18,6 +18,13 @@ import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
 
+/** Narrow away null/undefined without a `!` assertion (which lies to the compiler). */
+function defined<T>(value: T | null | undefined): T {
+	if (value == null) throw new Error("expected a defined value");
+	return value;
+}
+
+
 // ─── Test infra ──────────────────────────────────────────────
 
 interface CapturedRoute {
@@ -180,11 +187,8 @@ function buildFakeDb() {
 			// UPDATE "users" SET "name" = ?, "age" = ? WHERE "id" = ?
 			const setMatch = sql.match(/SET\s+(.+?)\s+WHERE/i);
 			if (!setMatch) return { rowsAffected: 0 };
-			const setCols = setMatch[1].split(",").map((s) =>
-				s
-					.trim()
-					.split(/\s*=\s*/)[0]
-					.replace(/"/g, ""),
+			const setCols = (setMatch[1] ?? "").split(",").map((s) =>
+				(s.trim().split(/\s*=\s*/)[0] ?? "").replace(/"/g, ""),
 			);
 			const whereVal = Number(params[params.length - 1]);
 			const row = rows.get(whereVal);
@@ -211,7 +215,7 @@ function buildFakeDb() {
 			// sqlite/postgres RETURNING branch. Insert a fresh row + return it.
 			const colMatch = sql.match(/\(([^)]+)\)\s*VALUES/i);
 			if (!colMatch) return bypassTypeCheck<T[]>([]);
-			const cols = colMatch[1]
+			const cols = (colMatch[1] ?? "")
 				.split(",")
 				.map((c) => c.trim().replace(/"/g, ""));
 			const row: Record<string, unknown> = {};
@@ -655,7 +659,7 @@ describe("station > security hardening", () => {
 		});
 		await create.handler(ctx);
 		expect(res.status).toBe(302);
-		const stored = [...rows.values()][0];
+		const stored = defined([...rows.values()][0]);
 		expect(stored.name).toBe("Alice");
 		expect(stored.age).toBe(30);
 		expect((stored as Record<string, unknown>).role).toBeUndefined();
@@ -742,7 +746,7 @@ describe("station > security hardening", () => {
 		const { ctx, res } = buildCtx({ body: { name: "Alice", age: "42" } });
 		await create.handler(ctx);
 		expect(res.status).toBe(302);
-		const stored = [...rows.values()][0];
+		const stored = defined([...rows.values()][0]);
 		expect(stored.age).toBe(42);
 	});
 
@@ -998,7 +1002,7 @@ describe("station > security hardening", () => {
 		const destroy = findRoute(routes, "delete", "/admin/users/:id");
 		const { ctx } = buildCtx({ params: { id: "7" } });
 		await destroy.handler(ctx);
-		expect(captured[0].before?.name).toBe("<redacted>");
+		expect(defined(captured[0]).before?.name).toBe("<redacted>");
 		// The mutation in the sink must NOT leak into the audit pipeline's
 		// view of subsequent events. Run a second destroy to confirm.
 		rows.set(8, { id: 8, name: "Fresh", age: 2 });
@@ -1006,10 +1010,10 @@ describe("station > security hardening", () => {
 		await destroy.handler(ctx2);
 		// Sink ran with a fresh deep-clone — the snapshot for row 8 must
 		// reflect the actual row, not echo the redaction from row 7.
-		expect(captured[1].before?.name).toBe("<redacted>"); // sink runs again
+		expect(defined(captured[1]).before?.name).toBe("<redacted>"); // sink runs again
 		// What we really care about: the snapshot's own fields are
 		// independent. Mutating before doesn't poison after.
-		const evt = captured[1];
+		const evt = defined(captured[1]);
 		if (evt.before) (evt.before as Record<string, unknown>).age = 999;
 		// `evt.after` (undefined for destroy) wouldn't have changed; what
 		// we assert is that the sink saw the REAL pre-delete row before
@@ -1042,12 +1046,12 @@ describe("station > 54.6 audit trail", () => {
 		});
 		await create.handler(ctx);
 		expect(events).toHaveLength(1);
-		expect(events[0].action).toBe("create");
-		expect(events[0].resource).toBe("users");
-		expect(events[0].userId).toBe("u-42");
-		expect(events[0].after).toMatchObject({ name: "Alice", age: 30 });
-		expect(events[0].before).toBeUndefined();
-		expect(events[0].at).toBeInstanceOf(Date);
+		expect(defined(events[0]).action).toBe("create");
+		expect(defined(events[0]).resource).toBe("users");
+		expect(defined(events[0]).userId).toBe("u-42");
+		expect(defined(events[0]).after).toMatchObject({ name: "Alice", age: 30 });
+		expect(defined(events[0]).before).toBeUndefined();
+		expect(defined(events[0]).at).toBeInstanceOf(Date);
 	});
 
 	it("emits before + after on edit and only before on destroy", async () => {
@@ -1078,11 +1082,11 @@ describe("station > 54.6 audit trail", () => {
 		await destroy.handler(delCtx);
 
 		expect(events).toHaveLength(2);
-		const editEvt = events[0];
+		const editEvt = defined(events[0]);
 		expect(editEvt.action).toBe("edit");
 		expect(editEvt.before).toMatchObject({ name: "Old" });
 		expect(editEvt.after).toMatchObject({ name: "New" });
-		const delEvt = events[1];
+		const delEvt = defined(events[1]);
 		expect(delEvt.action).toBe("destroy");
 		expect(delEvt.before).toMatchObject({ id: 7 });
 		expect(delEvt.after).toBeUndefined();
@@ -1112,8 +1116,8 @@ describe("station > 54.6 audit trail", () => {
 			// The audit failure is logged at error level (observable by
 			// monitoring), tagged COMPLIANCE GAP, naming the sink error.
 			expect(error).toHaveBeenCalledTimes(1);
-			expect(String(error.mock.calls[0][0])).toContain("COMPLIANCE GAP");
-			expect(String(error.mock.calls[0][0])).toContain("audit pipeline down");
+			expect(String(defined(error.mock.calls[0])[0])).toContain("COMPLIANCE GAP");
+			expect(String(defined(error.mock.calls[0])[0])).toContain("audit pipeline down");
 		} finally {
 			error.mockRestore();
 		}
@@ -1148,8 +1152,8 @@ describe("station > 54.6 audit trail", () => {
 			await create.handler(ctx);
 			expect(res.status).toBe(302); // create committed despite the failure
 			expect(seen).toHaveLength(1);
-			expect(seen[0].action).toBe("create");
-			expect(seen[0].msg).toBe("sink exploded");
+			expect(defined(seen[0]).action).toBe("create");
+			expect(defined(seen[0]).msg).toBe("sink exploded");
 		} finally {
 			error.mockRestore();
 		}

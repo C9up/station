@@ -28,9 +28,7 @@ export function kebabCase(input: string): string {
 export function titleCase(input: string): string {
 	return input
 		.split("-")
-		.map((part) =>
-			part.length === 0 ? part : part[0].toUpperCase() + part.slice(1),
-		)
+		.map((part) => part.charAt(0).toUpperCase() + part.slice(1))
 		.join(" ");
 }
 
@@ -80,7 +78,9 @@ function pluraliseWord(word: string): string {
  */
 export function pluralise(singular: string): string {
 	const segments = singular.split("-");
-	const last = segments[segments.length - 1];
-	segments[segments.length - 1] = pluraliseWord(last);
+	// `split` always yields at least one segment; popping it is what says so.
+	const last = segments.pop();
+	if (last === undefined) return singular;
+	segments.push(pluraliseWord(last));
 	return segments.join("-");
 }
