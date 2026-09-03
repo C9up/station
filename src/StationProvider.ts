@@ -26,6 +26,7 @@ import type {
 	DatabaseConnection,
 	DateColumnConfig,
 } from "@c9up/atlas";
+import { inProduction } from "./nodeEnv.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
@@ -1162,12 +1163,38 @@ export default class StationProvider {
 				}
 			}
 		}
-		if (!this.#authConfig.requireAuth && !authWarnEmitted) {
-			authWarnEmitted = true;
-			console.warn(
-				"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action `<resource>.<action>` permissions in the Warden rights store BEFORE production. See https://ream.dev/modules/station#auth.",
+		if (this.#authConfig.requireAuth) return;
+
+		// An admin panel with no auth is full CRUD on every registered resource
+		// for anyone who can reach the route. That is a different product, and
+		// in production it has to be asked for rather than fallen into — the
+		// same bet bay makes about losing a job on a Redis without LMOVE.
+		//
+		// `requireAuth: false` written down IS the asking. Defaulted (undefined)
+		// is not: it means nobody decided, and nobody deciding must not be how
+		// an unauthenticated admin reaches production.
+		if (inProduction() && userConfig.requireAuth !== false) {
+			throw new Error(
+				"[station] Admin routes would mount with NO authorisation in production: " +
+					"no working `auth` binding is registered, so every `/admin/*` route — " +
+					"including create, update and delete — is open to anyone who can reach it.\n" +
+					"  Wire @c9up/warden's WardenProvider, or set `station.requireAuth: false` " +
+					"to state that an unauthenticated admin is intended here.",
 			);
 		}
+
+		if (authWarnEmitted) return;
+		authWarnEmitted = true;
+		// Said even when the deployment opted in: agreeing once in a config file
+		// is not the same as being reminded that this process is running that
+		// way. The line has to be in the logs of the incident.
+		const optedIn = inProduction() && userConfig.requireAuth === false;
+		console.warn(
+			"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action `<resource>.<action>` permissions in the Warden rights store BEFORE production. See https://ream.dev/modules/station#auth." +
+				(optedIn
+					? "\n  Running this way in PRODUCTION because `station.requireAuth: false` was set."
+					: ""),
+		);
 	}
 
 	/** Phase 3 — mount the login surface + per-resource CRUD routes. */

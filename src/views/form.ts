@@ -15,7 +15,9 @@
  * `templates/form.inker`, which iterates + interpolates. inker owns the
  * HTML-escaping (the retired `escape.ts` no longer runs here). The CSRF hidden
  * input is emitted by inker's canonical `{{ csrfField() }}` helper, guarded by
- * the precomputed `csrfEnabled` boolean; enforcement remains story 57.6.
+ * the precomputed `csrfEnabled` boolean. Enforcement is the handler's: every
+ * write route fail-closes on `ctx.request.csrfProtected` before any auth or DB
+ * work, so a seeded token here is a convenience, never the check.
  */
 
 import type { ColumnMetadata } from "@c9up/atlas";
