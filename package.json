@@ -62,7 +62,8 @@
     "@vitest/coverage-v8": "^4.1.2",
     "reflect-metadata": "^0.2.2",
     "typescript": "^6.0.2",
-    "vitest": "^4.1.2"
+    "vitest": "^4.1.2",
+    "@c9up/ream": "^0.2.0"
   },
   "pnpm": {
     "//": "Pin the test toolchain to the versions used in dev. Without a committed lockfile the standalone CI resolves fresh (esbuild 0.28.x / vitest 4.1.9), whose decorator transform flakes 'Invalid or unexpected token' on the decorator suites. Overrides only apply when this package is the install root (CI), so the monorepo workspace is unaffected.",

@@ -1,3 +1,5 @@
+import "./augmentations.js";
+
 export { kebabCase, pluralise, titleCase } from "./casing.js";
 export { defineResource } from "./defineResource.js";
 export { ResourceRegistry } from "./ResourceRegistry.js";

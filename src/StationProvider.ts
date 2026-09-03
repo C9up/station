@@ -18,6 +18,7 @@
  * swallowed.
  */
 
+import "./augmentations.js";
 import { fileURLToPath } from "node:url";
 import type {
 	BaseRepository as AtlasBaseRepository,
