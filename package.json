@@ -54,6 +54,7 @@
     }
   },
   "devDependencies": {
+    "@c9up/warden": "^0.1.0",
     "@biomejs/biome": "^2.4.10",
     "@c9up/atlas": "^0.3.0",
     "@c9up/inker": "^0.1.0",
