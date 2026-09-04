@@ -42,12 +42,19 @@ jobs:
         run: pnpm install --no-frozen-lockfile
       - name: Typecheck
         run: pnpm exec tsc -p tsconfig.build.json --noEmit
+      # And the tests: `tsconfig.build.json` leaves them out, so every type a
+      # test relies on went ungated until this step ran the project's own
+      # `tsconfig.json`, which includes them.
+      - name: Typecheck (tests)
+        run: pnpm typecheck
       - name: Lint
         run: pnpm lint
       - name: Build (tsc)
         run: pnpm build
+      # With coverage: the thresholds in vitest.config.ts are only a gate if
+      # something runs them.
       - name: Vitest
-        run: pnpm exec vitest run
+        run: pnpm test:coverage
 
   # Publish job — gated on workflow_dispatch (manual maintainer trigger) AND
   # a green build-and-test. Requires NPM_TOKEN secret + a v<MAJOR>.<MINOR>.<PATCH>
