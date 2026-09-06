@@ -23,6 +23,18 @@ export function getStation(): ResourceRegistry | undefined {
 	return instance;
 }
 
+/**
+ * @internal Release the singleton, so a shut-down application does not leave a
+ * dead resource registry reachable through `services/main`.
+ *
+ * The caller checks ownership first (`getStation() === mine`): two applications
+ * share this module in one process, and the one shutting down must not clear
+ * what the other has since bound.
+ */
+export function clearStation(): void {
+	instance = undefined;
+}
+
 const station: ResourceRegistry = new Proxy({} as ResourceRegistry, {
 	get(_target, prop) {
 		if (!instance) {

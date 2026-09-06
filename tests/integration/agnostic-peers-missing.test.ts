@@ -416,3 +416,38 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 		});
 	});
 });
+
+describe("station > provider > shutdown", () => {
+	it("releases the services/main singleton it bound", async () => {
+		const { getStation } = await import("../../src/services/main.js");
+		const app = buildApp({ db: buildMinimalDb() });
+		const provider = new StationProvider(app);
+		provider.register();
+		await provider.boot();
+		expect(getStation()).toBeInstanceOf(ResourceRegistry);
+
+		await provider.shutdown();
+
+		// A stopped application left a registry reachable through
+		// `import station from '@c9up/station/services/main'`, still holding
+		// every resource that application had declared.
+		expect(getStation()).toBeUndefined();
+	});
+
+	it("leaves a registry another application has since bound alone", async () => {
+		const { getStation } = await import("../../src/services/main.js");
+		const provider = new StationProvider(buildApp({ db: buildMinimalDb() }));
+		provider.register();
+		await provider.boot();
+
+		const other = new StationProvider(buildApp({ db: buildMinimalDb() }));
+		other.register();
+		await other.boot();
+		const replacement = getStation();
+		if (!replacement) throw new Error("expected the second boot to bind one");
+
+		await provider.shutdown();
+
+		expect(getStation()).toBe(replacement);
+	});
+});

@@ -28,7 +28,7 @@ import type {
 } from "@c9up/atlas";
 import { inProduction } from "./nodeEnv.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
-import { setStation } from "./services/main.js";
+import { clearStation, getStation, setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
@@ -834,6 +834,9 @@ let auditCloneWarnEmitted = false;
 const TEMPLATES_ROOT = fileURLToPath(new URL("../templates/", import.meta.url));
 
 export default class StationProvider {
+	/** What this provider bound, so shutdown only clears its own. */
+	#owned: ResourceRegistry | undefined;
+
 	#contexts: Map<Resource, ResourceContext> = new Map();
 	#viewRenderer: InkerViewRenderer | undefined;
 	/**
@@ -871,7 +874,8 @@ export default class StationProvider {
 	async boot(): Promise<void> {
 		// Force-resolve so `setStation` runs even if no preload touches the
 		// singleton. Mirrors AuroraProvider.boot().
-		await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		this.#owned =
+			await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
 	}
 
 	async start(): Promise<void> {
@@ -1361,7 +1365,15 @@ export default class StationProvider {
 		);
 	}
 
-	async shutdown(): Promise<void> {}
+	async shutdown(): Promise<void> {
+		// Release the module-level singleton, while it is still ours. A stopped
+		// application left a dead resource registry reachable through `services/main`, and
+		// with two applications in one process the survivor's binding must not
+		// be the one cleared.
+		if (this.#owned !== undefined && getStation() === this.#owned)
+			clearStation();
+		this.#owned = undefined;
+	}
 
 	#requireContext(resource: Resource): ResourceContext {
 		const ctx = this.#contexts.get(resource);
