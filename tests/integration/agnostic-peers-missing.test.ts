@@ -31,7 +31,7 @@
  * Node-shaped error.
  */
 import "reflect-metadata";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
@@ -449,5 +449,78 @@ describe("station > provider > shutdown", () => {
 		await provider.shutdown();
 
 		expect(getStation()).toBe(replacement);
+	});
+});
+
+describe("station > provider > what the mounter and ready() do", () => {
+	it("holds the view-engine failure until a resource needs it", async () => {
+		// A view engine is a hard requirement once an admin surface exists — but
+		// an application that registers the provider and never declares a
+		// resource has no surface, and must not be forced to wire one. The
+		// failure is held at start() and rethrown by the first resource.
+		const app = buildApp({ db: buildMinimalDb(), bindInker: false });
+		const provider = new StationProvider(app);
+		provider.register();
+		await provider.boot();
+		captureRoutes(app);
+
+		// No resource: start() must not throw despite the missing renderer.
+		await expect(provider.start()).resolves.toBeUndefined();
+
+		const registry =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		expect(() =>
+			registry.register(defineResource({ entity: User, actions: ["list"] })),
+		).toThrow(/@c9up\/inker/);
+	});
+
+	it("mounts the shell once, however many resources arrive", async () => {
+		const app = buildApp({ db: buildMinimalDb() });
+		const provider = new StationProvider(app);
+		provider.register();
+		await provider.boot();
+		const { calls } = captureRoutes(app);
+		await provider.start();
+
+		const registry =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		registry.register(
+			defineResource({ entity: User, actions: ["list"], name: "users" }),
+		);
+		registry.register(
+			defineResource({ entity: User, actions: ["list"], name: "admins" }),
+		);
+
+		// `/admin` is the shell's, and belongs to no resource: mounting it twice
+		// would be a duplicate route on the second declaration.
+		expect(calls.filter((c) => c === "GET /admin")).toHaveLength(1);
+		expect(calls).toContain("GET /admin/users");
+		expect(calls).toContain("GET /admin/admins");
+	});
+
+	it("reports the gaps once, at ready(), when the surface is complete", async () => {
+		// ready() runs after every preload, which is the first moment the whole
+		// admin exists. Before the split these warnings fired at start(), when
+		// the registry could still be empty.
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			const app = buildApp({ db: buildMinimalDb() });
+			const provider = new StationProvider(app);
+			provider.register();
+			await provider.boot();
+			captureRoutes(app);
+			await provider.start();
+			const registry =
+				await app.container.resolve<ResourceRegistry>(ResourceRegistry);
+			registry.register(defineResource({ entity: User }));
+
+			warn.mockClear();
+			await provider.ready();
+
+			const said = warn.mock.calls.map((c) => String(c[0])).join("\n");
+			expect(said).toMatch(/audit sink|permissions/i);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 });
