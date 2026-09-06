@@ -26,7 +26,7 @@ import type {
 	DatabaseConnection,
 	DateColumnConfig,
 } from "@c9up/atlas";
-import { inProduction } from "./nodeEnv.js";
+import { inProduction } from "./vendor/nodeEnv.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
