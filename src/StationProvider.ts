@@ -26,10 +26,10 @@ import type {
 	DatabaseConnection,
 	DateColumnConfig,
 } from "@c9up/atlas";
-import { inProduction } from "./vendor/nodeEnv.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
+import { inProduction } from "./vendor/nodeEnv.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
 import { buildFormViewModel } from "./views/form.js";
