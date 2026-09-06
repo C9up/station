@@ -879,8 +879,14 @@ export default class StationProvider {
 
 		const registry =
 			await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
-		const resources = registry.all();
-		if (resources.length === 0) return;
+
+		// NOT gated on the registry being non-empty any more. Providers start
+		// BEFORE preloads run, and a preload is where the docs say to write
+		// `station.register(...)`, so reading a snapshot here and giving up when
+		// it was empty meant an application that followed the documentation got
+		// no admin at all. The surface is prepared here and each resource is
+		// mounted as it is declared — the shape upstream's Transmit uses for the
+		// same ordering problem.
 
 		// 54.7 — read the optional `station` config block. Defaults bake
 		// in `requireAuth: true` when @c9up/warden is detected later in
@@ -894,67 +900,94 @@ export default class StationProvider {
 		if (!peers) return;
 		const { router, atlas, rune } = peers;
 
-		// 57.7 fail-closed: a write-capable admin (create/edit) validates + guards
-		// mass-assignment through a rune-derived schema. If atlas is present (CRUD
-		// is live) but `@c9up/rune` is NOT installed, refuse to boot rather than
-		// silently accept unvalidated bodies — there is NO fallback to the deleted
-		// key-filter (`feedback_security_first`). Read-only admins need no rune.
-		if (rune === null && resourcesNeedValidation(resources)) {
-			throw new Error(
-				"[station] @c9up/rune is required to validate admin write forms (create/edit) but is not installed. Add @c9up/rune (a Station peer dependency) — Station will NOT fall back to unvalidated mass-assignment. See https://ream.dev/modules/station#mass-assignment.",
-			);
-		}
-
 		// Phase 1a2 — resolve the SHARED inker renderer (AdonisJS/Edge parity)
 		// and mount Station's package templates as the `station` disk. Unlike
 		// warden (whose absence keeps the open dev-preview path), a view engine
 		// is a HARD render requirement (D2): once an admin surface exists there
-		// is no page without it. Fail LOUD at boot when @c9up/inker is not wired
-		// — mirrors #resolveDb's loud-on-missing posture — rather than degrade
-		// silently or 500 on the first request.
-		const renderer = await this.#resolveViewRenderer();
-		// Mount once: `station::<template>` now resolves to this package's
-		// templates/ dir on the host's single inker engine (edge.mount parity).
-		renderer.mount("station", TEMPLATES_ROOT);
-		this.#viewRenderer = renderer;
+		// is no page without it.
+		//
+		// The failure is HELD rather than thrown: with no resource declared
+		// there is no admin surface, and an application that installed the
+		// provider without ever registering a resource must not be forced to
+		// wire a view engine. It is rethrown on the first resource, which is the
+		// moment the requirement becomes real.
+		let rendererFailure: unknown;
+		try {
+			const renderer = await this.#resolveViewRenderer();
+			// Mount once: `station::<template>` now resolves to this package's
+			// templates/ dir on the host's single inker engine (edge.mount parity).
+			renderer.mount("station", TEMPLATES_ROOT);
+			this.#viewRenderer = renderer;
+		} catch (err) {
+			rendererFailure = err;
+		}
 
 		// Phase 1b — wire the warden auth gate (or warn-once when it stays open).
 		await this.#configureAuth(userConfig);
 
-		// Phase 2 — build per-resource context ONCE. `#resolveDb()` is
-		// loud: if the host installed `@c9up/atlas` but didn't register
-		// `@c9up/atlas/provider` in `reamrc.ts`, AC11's "surface
-		// AtlasProvider misconfiguration" intent kicks in.
 		const db = await this.#resolveDb();
-		for (const resource of resources) {
+
+		// Phase 2 — mount every resource, now and as they arrive. The shell (the
+		// login surface, the `/admin` index) goes up with the first one: an
+		// application with no resources has no admin, and had none before.
+		let shellMounted = false;
+		registry.useMounter((resource) => {
+			if (!shellMounted) {
+				if (rendererFailure !== undefined) throw rendererFailure;
+				try {
+					this.#registerShellRoutes(router);
+				} catch (err) {
+					// The router proxy may still throw "Router accessed before
+					// initialization" on first property access (a boot-ordering
+					// hazard where the proxy module imported but Ignitor's
+					// `setRouter` never fired). That is a legitimate degraded-host
+					// shape — give up quietly. Anything else propagates.
+					if (isRouterProxyUninit(err)) return;
+					throw err;
+				}
+				shellMounted = true;
+			}
+			// 57.7 fail-closed: a write-capable admin (create/edit) validates +
+			// guards mass-assignment through a rune-derived schema. If atlas is
+			// present (CRUD is live) but `@c9up/rune` is NOT installed, refuse
+			// rather than silently accept unvalidated bodies — there is NO
+			// fallback to the deleted key-filter. Read-only admins need no rune.
+			// Checked per resource, so the refusal names the one at fault.
+			if (rune === null && resourcesNeedValidation([resource])) {
+				throw new Error(
+					`[station] @c9up/rune is required to validate the write forms of the '${resource.name}' admin (create/edit) but is not installed. Add @c9up/rune (a Station peer dependency) — Station will NOT fall back to unvalidated mass-assignment. See https://ream.dev/modules/station#mass-assignment.`,
+				);
+			}
 			this.#contexts.set(
 				resource,
 				buildResourceContext(resource, db, atlas, rune),
 			);
-		}
-
-		// 56.5 + 54.6 boot-time warn-onces. We surface the "auth wired but no
-		// permissions seeded" and "no audit sink" gaps loud-and-once so a
-		// half-wired install can't ship to prod without operators noticing.
-		// (CSRF is no longer a boot-time warn — enforcement is request-time and
-		// honest now: every write route fail-closes on `ctx.request.csrfProtected`.)
-		this.#warnSeedPermissionsOnce(resources);
-		this.#warnAuditGapsOnce(resources);
-
-		// Phase 3 — route registration. The router proxy may still throw
-		// "Router accessed before initialization" on first property access
-		// (boot ordering hazard where the proxy module imported but
-		// Ignitor's `setRouter` never fired). That's another legitimate
-		// degraded-host shape — silent return. Anything else (slug
-		// collision, future validation) propagates.
-		try {
-			this.#registerAdminRoutes(router, resources);
-		} catch (err) {
-			if (isRouterProxyUninit(err)) return;
-			throw err;
-		}
+			this.#registerResourceRoutes(router, resource);
+		});
 
 		this.#started = true;
+	}
+
+	/**
+	 * The gaps worth reporting once, when the full set of resources is known.
+	 *
+	 * `ready()` runs after every preload, so this is the first moment the whole
+	 * admin surface exists. Nothing is mounted here — the routes were built as
+	 * each resource was declared.
+	 */
+	async ready(): Promise<void> {
+		if (!this.#started) return;
+		const registry =
+			await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		const resources = registry.all();
+		if (resources.length === 0) return;
+		// 56.5 + 54.6 — "auth wired but no permissions seeded" and "no audit
+		// sink" are surfaced loud-and-once so a half-wired install cannot ship to
+		// prod without operators noticing. (CSRF is not a boot-time warn:
+		// enforcement is request-time, and every write route fail-closes on
+		// `ctx.request.csrfProtected`.)
+		this.#warnSeedPermissionsOnce(resources);
+		this.#warnAuditGapsOnce(resources);
 	}
 
 	/**
@@ -1198,10 +1231,20 @@ export default class StationProvider {
 	}
 
 	/** Phase 3 — mount the login surface + per-resource CRUD routes. */
-	#registerAdminRoutes(
-		router: StationRouter,
-		resources: ReadonlyArray<Resource>,
-	): void {
+	/** Wrap a handler in the auth gate when one is configured. */
+	#gate(
+		handler: (ctx: StationHttpContext) => Promise<void>,
+	): (ctx: StationHttpContext) => Promise<void> {
+		return this.#authConfig.requireAuth ? this.#withAuth(handler) : handler;
+	}
+
+	/**
+	 * The routes that belong to the admin itself rather than to a resource.
+	 *
+	 * Registered once, while the provider starts — before the HTTP server is
+	 * listening, and before any resource has necessarily been declared.
+	 */
+	#registerShellRoutes(router: StationRouter): void {
 		// 54.7 — mount login surface first when auth is required, so
 		// `/admin/login` is reachable even when the auth gate redirects every
 		// other path to it.
@@ -1211,22 +1254,30 @@ export default class StationProvider {
 			router.post("/admin/logout", this.#buildLogoutHandler());
 		}
 
-		const gate = (
-			handler: (ctx: StationHttpContext) => Promise<void>,
-		): ((ctx: StationHttpContext) => Promise<void>) =>
-			this.#authConfig.requireAuth ? this.#withAuth(handler) : handler;
-
-		// `/admin` index — send the operator to the first listable resource (or the
-		// login surface). Without it, the post-login redirect("/admin") lands on a 404.
+		// `/admin` index — send the operator to the first listable resource (or
+		// the login surface). Without it, the post-login redirect("/admin") lands
+		// on a 404.
+		//
+		// The registry is read WHEN THE REQUEST ARRIVES, not when this route is
+		// built: resources are declared in preloads, so a list captured here
+		// would name whatever happened to exist first — or nothing at all.
 		router.get(
 			"/admin",
-			gate(async (ctx) => {
-				const home = resources.find((r) => r.actions.includes("list"));
+			this.#gate(async (ctx) => {
+				const registry =
+					await this.app.container.resolve<ResourceRegistry>(ResourceRegistry);
+				const home = registry.all().find((r) => r.actions.includes("list"));
 				ctx.response.redirect(home ? `/admin/${home.name}` : "/admin/login");
 			}),
 		);
+	}
 
-		for (const resource of resources) {
+	/** Every route one resource contributes, mounted the moment it is declared. */
+	#registerResourceRoutes(router: StationRouter, resource: Resource): void {
+		const gate = (
+			handler: (ctx: StationHttpContext) => Promise<void>,
+		): ((ctx: StationHttpContext) => Promise<void>) => this.#gate(handler);
+		{
 			const slug = resource.name;
 			if (resource.actions.includes("list")) {
 				router.get(`/admin/${slug}`, gate(this.#buildListHandler(resource)));
@@ -1309,8 +1360,6 @@ export default class StationProvider {
 			`[station] No audit sink configured for write-enabled resources: ${missing.map((r) => r.name).join(", ")}. Pass 'audit:' in defineResource() to persist mutations to your audit log.`,
 		);
 	}
-
-	async ready(): Promise<void> {}
 
 	async shutdown(): Promise<void> {}
 

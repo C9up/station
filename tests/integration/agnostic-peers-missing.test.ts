@@ -322,6 +322,32 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			expect(err.cause.message).toMatch(/not a usable view renderer/);
 		});
 
+		it("mounts a resource declared AFTER start(), the way a preload declares one", async () => {
+			// The defect this closes: the provider read a snapshot of the registry
+			// in `start()` and gave up when it was empty. Providers start BEFORE
+			// preloads run, and a preload is where the documentation says to write
+			// `station.register(...)` — so an application that followed the docs
+			// got no admin at all, and nothing said why.
+			const app = buildApp({ db: buildMinimalDb() });
+			const provider = new StationProvider(app);
+			provider.register();
+			await provider.boot();
+			const { calls } = captureRoutes(app);
+
+			await provider.start();
+			// Nothing yet — no resource has been declared.
+			expect(calls).toEqual([]);
+
+			// What a preload writes, after every provider has started.
+			const registry =
+				await app.container.resolve<ResourceRegistry>(ResourceRegistry);
+			registry.register(defineResource({ entity: User, actions: ["list"] }));
+
+			// Mounted on the spot: the shell and the resource's own routes.
+			expect(calls).toContain("GET /admin");
+			expect(calls).toContain("GET /admin/users");
+		});
+
 		it("empty registry ⇒ start() returns early, inker never required", async () => {
 			const app = buildApp({ db: buildMinimalDb(), bindInker: false });
 			const provider = new StationProvider(app);
