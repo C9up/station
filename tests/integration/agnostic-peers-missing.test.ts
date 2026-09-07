@@ -36,6 +36,7 @@ import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
 	isModuleNotFound,
+	isPackageMissing,
 	resetStationProviderFlags,
 	resourcesNeedValidation,
 	type StationAppContext,
@@ -522,5 +523,54 @@ describe("station > provider > what the mounter and ready() do", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+});
+
+/**
+ * "atlas is missing" and "something inside atlas is missing" are not the same.
+ *
+ * Both raise `ERR_MODULE_NOT_FOUND`, and the guard read only the code — so an
+ * installed atlas with a broken dependency of its own was taken for an absent
+ * peer and the admin was disabled silently. That is the degraded-host path
+ * doing precisely the wrong thing: the peer IS there, something in it is
+ * broken, and the operator has to be told.
+ */
+describe("station > telling an absent peer from a broken one", () => {
+	/** What Node raises for a bare specifier that resolves to nothing. */
+	const absent = (specifier: string) =>
+		Object.assign(
+			new Error(
+				`Cannot find package '${specifier}' imported from /app/node_modules/@c9up/station/index.js`,
+			),
+			{ code: "ERR_MODULE_NOT_FOUND" },
+		);
+
+	/** What Node raises when a file INSIDE an installed package is missing. */
+	const brokenInside = (specifier: string) =>
+		Object.assign(
+			new Error(
+				`Cannot find module '/app/node_modules/${specifier}/build/internal.js' imported from /app/node_modules/${specifier}/index.js`,
+			),
+			{ code: "ERR_MODULE_NOT_FOUND" },
+		);
+
+	it("recognises the peer itself being absent", () => {
+		expect(isPackageMissing(absent("@c9up/atlas"), "@c9up/atlas")).toBe(true);
+	});
+
+	it("does NOT treat a broken internal import as an absent peer", () => {
+		expect(isPackageMissing(brokenInside("@c9up/atlas"), "@c9up/atlas")).toBe(
+			false,
+		);
+	});
+
+	it("does not confuse one peer for another", () => {
+		// A missing rune must not read as a missing atlas, or the admin is
+		// disabled for a reason that has nothing to do with it.
+		expect(isPackageMissing(absent("@c9up/rune"), "@c9up/atlas")).toBe(false);
+	});
+
+	it("ignores an error that is not a module resolution failure at all", () => {
+		expect(isPackageMissing(new Error("boom"), "@c9up/atlas")).toBe(false);
 	});
 });
