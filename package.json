@@ -34,7 +34,7 @@
     "@c9up/inker": "^0.1.0",
     "@c9up/ream": "^0.2.0",
     "@c9up/rune": "^0.1.8",
-    "@c9up/warden": "^0.1.0"
+    "@c9up/warden": "^0.1.0 || ^0.2.0"
   },
   "peerDependenciesMeta": {
     "@c9up/atlas": {
@@ -54,7 +54,7 @@
     }
   },
   "devDependencies": {
-    "@c9up/warden": "^0.1.0",
+    "@c9up/warden": "^0.2.0",
     "@biomejs/biome": "^2.4.10",
     "@c9up/atlas": "^0.3.0",
     "@c9up/inker": "^0.1.0",
