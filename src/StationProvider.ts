@@ -287,7 +287,7 @@ type RuneValidationResult =
 /**
  * A built rune schema — only the result-based check is consumed.
  *
- * `validateResult`, NOT `validate`: rune reserves `validate()` for the VineJS
+ * `validateResult`, NOT `validate`: rune reserves `validate()` for the
  * contract (async, throwing). Reading `.valid` off a Promise gives `undefined`,
  * so keeping the old name would have made every admin write fail closed with an
  * empty error list.
@@ -548,11 +548,14 @@ export function resourcesNeedValidation(
  * NEVER `in` on an instance (`@Column() declare` makes `in` always false —
  * mirror `BaseRepository.#hydrate`).
  *
- * Per-column rule mapping tolerates the form-post wire shape (values arrive as
- * strings — rune does NOT coerce): booleans `.parse(isCheckedValue)`, numbers
+ * Per-column rule mapping tolerates the form-post wire shape, where every
+ * value arrives as a string: booleans `.parse(isCheckedValue)`, numbers
  * `.parse` string→Number (NaN falls through to a type error), everything else
- * `rules.string()`. `.parse`/`.optional`/`.nullable` force rune's TS path, so
- * no native `.node` is touched.
+ * `rules.string()`. The explicit `.parse` is deliberate even though rune now
+ * coerces both itself — a checkbox posts the values IT chooses (`isCheckedValue`
+ * is the column's own truthy spelling), which is a wider set than any
+ * general-purpose coercion should accept. `.parse`/`.optional`/`.nullable`
+ * force rune's TS path, so no native `.node` is touched.
  *
  * Returns the built schema plus the set of boolean columns — the handler
  * default-fills an ABSENT boolean key to `false` before validating (an
@@ -653,7 +656,7 @@ function fieldErrors(
 	const out: Record<string, string> = {};
 	for (const e of errors) {
 		if (e.field === "_root") continue;
-		// Collapse a nested VineJS-style path (`profile.name`) to its top-level
+		// Collapse a nested dotted path (`profile.name`) to its top-level
 		// key — `form.ts` keys errors by column propertyKey. `split` always yields
 		// a non-empty array, so `[0]` is a string (no fallback needed).
 		const [key = e.field] = e.field.split(".");
@@ -1409,7 +1412,7 @@ export default class StationProvider {
 	 * Fail-closed response for invalid write input (57.7, AC4). Content-negotiated:
 	 *
 	 *  - **JSON/XHR** → `422` with `{ error, code: "E_VALIDATION_ERROR", messages }`
-	 *    (Adonis/Vine parity — API clients get the machine-readable errors).
+	 *    (Adonis parity — API clients get the machine-readable errors).
 	 *  - **HTML with a session** → the AdonisJS web idiom (PRG): flash the old
 	 *    input + per-field errors, then `redirect().back()` to the form `GET`,
 	 *    which re-reads the flash and re-renders with values + errors. No inline
@@ -1432,7 +1435,7 @@ export default class StationProvider {
 	): Promise<void> {
 		if (wantsJsonResponse(ctx)) {
 			ctx.response.status(422);
-			// AdonisJS/VineJS parity: `{ errors: [{ field, rule, message }] }` —
+			// AdonisJS parity: `{ errors: [{ field, rule, message }] }` —
 			// the same shape ream's own `E_VALIDATION_ERROR` handler emits.
 			ctx.response.json({
 				errors: errors.map((e) => ({

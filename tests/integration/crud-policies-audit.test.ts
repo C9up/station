@@ -761,7 +761,7 @@ describe("station > security hardening", () => {
 		expect(res.status).toBe(422);
 		expect(res.contentType).toBe("application/json");
 		// Assert on the raw JSON string (avoids an untyped JSON.parse). AdonisJS/
-		// VineJS parity: `{ errors: [{ field, rule, message }] }`.
+		// AdonisJS parity: `{ errors: [{ field, rule, message }] }`.
 		expect(res.body).toContain('"errors"');
 		expect(res.body).toContain('"field":"age"');
 	});
