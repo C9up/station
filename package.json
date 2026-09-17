@@ -1,6 +1,6 @@
 {
   "name": "@c9up/station",
-  "version": "0.1.13",
+  "version": "0.1.14",
   "description": "Station — admin scaffolding for the Ream framework. Declarative resource catalogue (defineResource) backing list/show/create/edit/destroy routes, audit, policies.",
   "license": "MIT",
   "type": "module",
@@ -19,6 +19,9 @@
       "types": "./src/services/main.ts",
       "import": "./src/services/main.ts"
     }
+  },
+  "engines": {
+    "node": ">=22.0.0"
   },
   "scripts": {
     "prebuild": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
