@@ -479,7 +479,7 @@ describe("station > 54.3 create/edit/destroy CRUD", () => {
 describe("station > 56.5 permission gate (Warden unified layer)", () => {
 	beforeEach(() => resetStationProviderFlags());
 
-	it("authenticated user WITHOUT the `users.create` permission → 403 (fail-closed, auth wired but no grant)", async () => {
+	it("authenticated user WITHOUT the `station.users.create` permission → 403 (fail-closed, auth wired but no grant)", async () => {
 		const { db } = buildFakeDb();
 		const auth = buildFakeAuth({ permissions: [] }); // rights store grants nothing
 		const { routes } = await bootStation({
@@ -543,10 +543,12 @@ describe("station > 56.5 permission gate (Warden unified layer)", () => {
 		expect(res.status).toBe(503);
 	});
 
-	it("grants `users.create` but not `users.destroy` → create passes (302), destroy 403s (per-action granularity)", async () => {
+	it("grants `station.users.create` but not `station.users.destroy` → create passes (302), destroy 403s (per-action granularity)", async () => {
 		const { db, rows } = buildFakeDb();
 		rows.set(7, { id: 7, name: "X", age: 1 });
-		const auth = buildFakeAuth({ permissions: ["users.create"] });
+		const auth = buildFakeAuth({
+			permissions: ["station.access", "station.users.create"],
+		});
 		const { routes } = await bootStation({
 			db,
 			auth,

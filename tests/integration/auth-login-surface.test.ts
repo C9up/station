@@ -629,14 +629,15 @@ describe("station > integration > 54.7 warden integration + login surface", () =
 		expect(ctx.auth?.roles).toContain("admin");
 	});
 
-	it("permission gate (56.5): an authenticated user lacking `users.list` is denied at the authorization layer", async () => {
-		// No requireRole, so authentication alone passes #withAuth; the deny
-		// comes from the per-action permission gate — `auth.hasPermission`
-		// returns false for the unseeded `users.list`. Distinguished from
-		// the requireRole gate by the response body (deny() vs "Forbidden").
+	it("permission gate (56.5): an authenticated user lacking `station.users.list` is denied at the authorization layer", async () => {
+		// No requireRole, and the admin access permission is granted, so
+		// #withAuth passes; the deny comes from the per-action permission gate
+		// — `auth.hasPermission` returns false for the unseeded
+		// `station.users.list`. Distinguished from the requireRole gate by the
+		// response body (deny() vs "Forbidden").
 		const { manager } = buildFakeAuth({
 			user: { id: 5, email: "ed@example.com", roles: ["editor"] },
-			permissions: [], // rights store grants nothing
+			permissions: ["station.access"],
 		});
 		const { routes } = await bootStation({ auth: manager });
 		const list = routes.find(

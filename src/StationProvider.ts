@@ -453,11 +453,23 @@ export interface StationConfig {
 	 */
 	requireAuth?: boolean;
 	/**
-	 * Role required to pass the auth gate. When omitted, any
-	 * authenticated user can access `/admin/*` (the per-action
-	 * `<resource>.<action>` permission gate still applies).
+	 * Role required to pass the auth gate, on top of {@link accessPermission}.
 	 */
 	requireRole?: string;
+	/**
+	 * Namespace of every admin permission: actions are gated behind
+	 * `<prefix>.<resource>.<action>` (e.g. `station.users.edit`) and entry
+	 * behind `<prefix>.access`. Defaults to `"station"`, so a grant the
+	 * application made for its own features (`users.edit`) never opens the
+	 * admin.
+	 */
+	permissionPrefix?: string;
+	/**
+	 * Permission every request must hold to enter `/admin/*`, checked before
+	 * the per-action one. Defaults to `<permissionPrefix>.access`. `false`
+	 * removes this gate (the per-action permissions still apply).
+	 */
+	accessPermission?: string | false;
 	/**
 	 * Where to redirect on a failed auth check. Defaults to
 	 * `/admin/login`.
@@ -471,6 +483,7 @@ export interface StationConfig {
 }
 
 const MAX_PER_PAGE = 100;
+const DEFAULT_PERMISSION_PREFIX = "station";
 const DEFAULT_PER_PAGE = 25;
 const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
@@ -889,11 +902,15 @@ export default class StationProvider {
 	#authConfig: Required<Pick<StationConfig, "loginPath" | "cookieName">> & {
 		requireAuth: boolean;
 		requireRole: string | undefined;
+		permissionPrefix: string;
+		accessPermission: string | undefined;
 	} = {
 		requireAuth: false,
 		requireRole: undefined,
 		loginPath: "/admin/login",
 		cookieName: "station_auth",
+		permissionPrefix: DEFAULT_PERMISSION_PREFIX,
+		accessPermission: undefined,
 	};
 
 	constructor(protected app: StationAppContext) {}
@@ -1216,6 +1233,13 @@ export default class StationProvider {
 	 * not installed/bound the gate stays open and a one-time warning is emitted.
 	 */
 	async #configureAuth(userConfig: StationConfig): Promise<void> {
+		const permissionPrefix =
+			userConfig.permissionPrefix ?? DEFAULT_PERMISSION_PREFIX;
+		if (typeof permissionPrefix !== "string" || permissionPrefix === "") {
+			throw new Error(
+				"[station] `station.permissionPrefix` must be a non-empty string: admin permissions need their own namespace.",
+			);
+		}
 		const wardenWanted = userConfig.requireAuth !== false;
 		if (wardenWanted) {
 			try {
@@ -1226,6 +1250,11 @@ export default class StationProvider {
 					requireRole: userConfig.requireRole,
 					loginPath: userConfig.loginPath ?? "/admin/login",
 					cookieName: userConfig.cookieName ?? "station_auth",
+					permissionPrefix,
+					accessPermission:
+						userConfig.accessPermission === false
+							? undefined
+							: (userConfig.accessPermission ?? `${permissionPrefix}.access`),
 				};
 			} catch (cause) {
 				// Container has no working `auth` binding → warden not wired.
@@ -1399,8 +1428,15 @@ export default class StationProvider {
 		seedPermsWarned = true;
 		const [example] = resources;
 		if (example === undefined) return;
+		const prefix = this.#authConfig.permissionPrefix;
+		const access = this.#authConfig.accessPermission;
+		const perms = [
+			...(access === undefined ? [] : [access]),
+			`${prefix}.${example.name}.list`,
+			`${prefix}.${example.name}.create`,
+		];
 		console.warn(
-			`[station] Admin actions are gated behind '<resource>.<action>' permissions resolved through @c9up/warden (e.g. '${example.name}.list', '${example.name}.create'). Seed roles/grants in the Warden rights store (store.defineRole('admin', ['${example.name}.list', '${example.name}.create', ...]) then assignRole) or every admin request will 403. See https://ream.dev/modules/station#authorization.`,
+			`[station] Admin actions are gated behind '${prefix}.<resource>.<action>' permissions resolved through @c9up/warden${access === undefined ? "" : `, and entering the admin behind '${access}'`}. Seed roles/grants in the Warden rights store (store.defineRole('admin', [${perms.map((p) => `'${p}'`).join(", ")}, ...]) then assignRole) or every admin request will 403. See https://ream.dev/modules/station#authorization.`,
 		);
 	}
 
@@ -1541,7 +1577,15 @@ export default class StationProvider {
 			// every other action — resolved through the Warden `"auth"`
 			// layer. (Retro 2026-06-01: list previously skipped the gate
 			// entirely, leaking the index regardless of authorization.)
-			if (!(await authorizeAction(resource, "list", ctx, this.#authManager))) {
+			if (
+				!(await authorizeAction(
+					resource,
+					"list",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
+			) {
 				deny(ctx);
 				return;
 			}
@@ -1599,7 +1643,15 @@ export default class StationProvider {
 			// Authorize BEFORE the existence check so an unauthorized caller
 			// can't distinguish 404 (absent) from 403 (exists) — no row-existence
 			// oracle for a user without `<resource>.show`.
-			if (!(await authorizeAction(resource, "show", ctx, this.#authManager))) {
+			if (
+				!(await authorizeAction(
+					resource,
+					"show",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
+			) {
 				deny(ctx);
 				return;
 			}
@@ -1631,7 +1683,13 @@ export default class StationProvider {
 			const { formColumns, pkColumn, writeOnly } =
 				this.#requireContext(resource);
 			if (
-				!(await authorizeAction(resource, "create", ctx, this.#authManager))
+				!(await authorizeAction(
+					resource,
+					"create",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
 			) {
 				deny(ctx);
 				return;
@@ -1669,7 +1727,13 @@ export default class StationProvider {
 			const { repo, pkColumn, columns, booleanKeys, writeOnly } =
 				this.#requireContext(resource);
 			if (
-				!(await authorizeAction(resource, "create", ctx, this.#authManager))
+				!(await authorizeAction(
+					resource,
+					"create",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
 			) {
 				deny(ctx);
 				return;
@@ -1713,7 +1777,15 @@ export default class StationProvider {
 			const { repo, formColumns, pkColumn, writeOnly } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
-			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
+			if (
+				!(await authorizeAction(
+					resource,
+					"edit",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
+			) {
 				deny(ctx);
 				return;
 			}
@@ -1758,7 +1830,15 @@ export default class StationProvider {
 			const { repo, pkColumn, columns, booleanKeys, writeOnly } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
-			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
+			if (
+				!(await authorizeAction(
+					resource,
+					"edit",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
+			) {
 				deny(ctx);
 				return;
 			}
@@ -1881,7 +1961,13 @@ export default class StationProvider {
 			const { repo, pkColumn, columns } = this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (
-				!(await authorizeAction(resource, "destroy", ctx, this.#authManager))
+				!(await authorizeAction(
+					resource,
+					"destroy",
+					ctx,
+					this.#authManager,
+					this.#authConfig.permissionPrefix,
+				))
 			) {
 				deny(ctx);
 				return;
@@ -2059,6 +2145,26 @@ export default class StationProvider {
 					ctx.response.status(403);
 					ctx.response.type("text/plain; charset=utf-8");
 					ctx.response.send("Forbidden");
+					return;
+				}
+			}
+			// Entering the admin is its own grant (bug 214): without it, any app
+			// user holding a same-named permission for the public app got in.
+			const access = this.#authConfig.accessPermission;
+			if (access !== undefined) {
+				let accessOk: boolean;
+				try {
+					accessOk =
+						(await manager.hasPermission(user, access, "global")) === true;
+				} catch (err) {
+					const detail = err instanceof Error ? err.message : String(err);
+					console.error(
+						`[station] access check threw for '${access}' — denying (fail-closed): ${detail}`,
+					);
+					accessOk = false;
+				}
+				if (!accessOk) {
+					deny(ctx);
 					return;
 				}
 			}
@@ -2390,8 +2496,10 @@ async function authorizeAction(
 	action: ResourceAction,
 	ctx: StationHttpContext,
 	authManager: WardenAuthManager | undefined,
+	prefix: string,
 	scope: StationScope = "global",
 ): Promise<boolean> {
+	const permission = `${prefix}.${resource.name}.${action}`;
 	if (authManager === undefined) return true;
 	const user = ctx.auth?.user;
 	// `=== undefined` alone is too narrow: a host whose middleware writes
@@ -2402,19 +2510,13 @@ async function authorizeAction(
 		// Coerce to a strict boolean: the duck-typed manager could resolve a
 		// truthy non-boolean, and `!truthy` would silently ALLOW. Anything
 		// not exactly `true` denies (fail-closed).
-		return (
-			(await authManager.hasPermission(
-				user,
-				`${resource.name}.${action}`,
-				scope,
-			)) === true
-		);
+		return (await authManager.hasPermission(user, permission, scope)) === true;
 	} catch (err) {
 		// A rights-store I/O failure (DB/Redis-backed resolver) must not pass
 		// the gate. Deny and surface it loud rather than 500-ing or allowing.
 		const detail = err instanceof Error ? err.message : String(err);
 		console.error(
-			`[station] authorization check threw for '${resource.name}.${action}' — denying (fail-closed): ${detail}`,
+			`[station] authorization check threw for '${permission}' — denying (fail-closed): ${detail}`,
 		);
 		return false;
 	}
