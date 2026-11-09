@@ -26,6 +26,13 @@ import type {
 	DatabaseConnection,
 	DateColumnConfig,
 } from "@c9up/atlas";
+import {
+	editableColumns,
+	isFrameworkManaged,
+	isSecretColumn,
+	viewColumns,
+	writeOnlyKeys,
+} from "./columns.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
@@ -200,7 +207,16 @@ interface StationPaginator {
 /** Per-resource snapshot built once at `start()`, reused on every request. */
 interface ResourceContext {
 	repo: StationRepository;
+	/** Every column — audit snapshots read these (secrets redacted there). */
 	columns: ReadonlyArray<ColumnMetadata>;
+	/** What the list page renders (bug 209: secrets excluded by default). */
+	listColumns: ReadonlyArray<ColumnMetadata>;
+	/** What the show page renders. */
+	showColumns: ReadonlyArray<ColumnMetadata>;
+	/** The editable allow-list — the form's fields and the schema's keys. */
+	formColumns: ReadonlyArray<ColumnMetadata>;
+	/** Editable columns never pre-filled; an empty submission keeps them. */
+	writeOnly: ReadonlySet<string>;
 	pkColumn: string;
 	/**
 	 * Property keys of framework-managed timestamp columns — those declared
@@ -220,6 +236,8 @@ interface ResourceContext {
 	 * unchecked box submits nothing).
 	 */
 	writableSchema?: RuneSchema;
+	/** Same keys, write-only columns optional: an edit may leave them as stored. */
+	updateSchema?: RuneSchema;
 	booleanKeys: ReadonlySet<string>;
 }
 
@@ -491,17 +509,6 @@ function notFoundFailFingerprint(cause: unknown): string {
  */
 const NOT_FOUND_RENDER_FAIL_CAP = 32;
 
-const TIMESTAMP_PROPERTY_KEYS: ReadonlySet<string> = new Set([
-	"createdAt",
-	"updatedAt",
-	"deletedAt",
-]);
-const TIMESTAMP_COLUMN_NAMES: ReadonlySet<string> = new Set([
-	"created_at",
-	"updated_at",
-	"deleted_at",
-]);
-
 /**
  * Column `type` strings mapped to a numeric rune rule (mirrors form.ts input
  * inference). `bigint` is deliberately EXCLUDED: coercing it through `Number()`
@@ -537,9 +544,9 @@ export function resourcesNeedValidation(
  * Derive a `@c9up/rune` validation schema (57.7) from an entity's writable
  * column metadata — the structural replacement for the hand-rolled
  * `filterWritableBody`. The mass-assignment guarantee is now INHERENT:
- * `schema.validateResult()` returns only declared-column keys, so unknown body keys
- * (`role`, `passwordHash`, PK, timestamps) are dropped automatically — no
- * explicit filtering pass.
+ * `schema.validateResult()` returns only the keys of the editable columns it
+ * was given, so any other body key — an unknown one, a column outside the
+ * allow-list, the PK, a timestamp — is dropped automatically.
  *
  * Excluded, exactly as the old guard did: the primary key, framework-managed
  * timestamps (both the Lucid-style `autoManaged` flag AND the `created_at /
@@ -560,7 +567,9 @@ export function resourcesNeedValidation(
  * Returns the built schema plus the set of boolean columns — the handler
  * default-fills an ABSENT boolean key to `false` before validating (an
  * unchecked checkbox submits nothing; this preserves the old edit-clears-box
- * behaviour).
+ * behaviour). `columns` is the editable allow-list; framework-owned columns
+ * are dropped here too, so no caller can make them writable. `updateSchema`
+ * differs only for `writeOnly` columns, which an edit may leave out.
  */
 export function deriveWritableSchema(
 	columns: ReadonlyArray<ColumnMetadata>,
@@ -568,41 +577,65 @@ export function deriveWritableSchema(
 	autoManaged: ReadonlySet<string>,
 	excludedProps: ReadonlySet<string>,
 	rune: RuneModule,
-): { schema: RuneSchema; booleanKeys: ReadonlySet<string> } {
+	writeOnly: ReadonlySet<string> = new Set(),
+): {
+	schema: RuneSchema;
+	updateSchema: RuneSchema;
+	booleanKeys: ReadonlySet<string>;
+} {
 	const fields: Record<string, RuneRuleChain> = {};
+	const updateFields: Record<string, RuneRuleChain> = {};
 	const booleanKeys = new Set<string>();
 	for (const c of columns) {
-		if (c.propertyKey === pkColumn) continue;
-		if (autoManaged.has(c.propertyKey)) continue;
-		if (TIMESTAMP_PROPERTY_KEYS.has(c.propertyKey)) continue;
-		const snake = c.propertyKey.replace(/([A-Z])/g, "_$1").toLowerCase();
-		if (TIMESTAMP_COLUMN_NAMES.has(snake)) continue;
-		if (excludedProps.has(c.propertyKey)) continue;
+		if (isFrameworkManaged(c, pkColumn, autoManaged, excludedProps)) continue;
 		const type = (c.type ?? "").toString().toLowerCase();
 		if (type === "boolean") {
 			// Checkbox: the handler pre-fills an absent key to `false`, so every
 			// boolean is always present here → required, no `.optional()`.
 			booleanKeys.add(c.propertyKey);
 			fields[c.propertyKey] = rune.rules.boolean().parse(isCheckedValue);
+			updateFields[c.propertyKey] = rune.rules.boolean().parse(isCheckedValue);
 			continue;
 		}
-		// A column is required iff the model declares neither nullability nor a
-		// default. DB-side defaults (serial, `DEFAULT`) are invisible to metadata
-		// (documented residual limitation — see story Dev Notes); the PK, the
-		// common serial case, is already excluded above.
-		const required = c.nullable !== true && c.default === undefined;
-		let chain: RuneRuleChain = NUMBER_COLUMN_TYPES.has(type)
-			? rune.rules.number().parse(parseNumeric)
-			: JSON_COLUMN_TYPES.has(type)
-				? rune.rules.any()
-				: rune.rules.string();
-		if (!required) {
-			chain = chain.optional();
-			if (c.nullable === true) chain = chain.nullable();
-		}
-		fields[c.propertyKey] = chain;
+		fields[c.propertyKey] = columnChain(c, type, rune, false);
+		updateFields[c.propertyKey] = columnChain(
+			c,
+			type,
+			rune,
+			writeOnly.has(c.propertyKey),
+		);
 	}
-	return { schema: rune.schema(fields), booleanKeys };
+	return {
+		schema: rune.schema(fields),
+		updateSchema: rune.schema(updateFields),
+		booleanKeys,
+	};
+}
+
+/**
+ * The rule for one non-boolean column. A column is required iff the model
+ * declares neither nullability nor a default — unless `keepable`: an edit may
+ * omit a write-only column to keep its stored value. DB-side defaults
+ * (serial, `DEFAULT`) are invisible to metadata (documented residual
+ * limitation); the PK, the common serial case, is never editable.
+ */
+function columnChain(
+	c: ColumnMetadata,
+	type: string,
+	rune: RuneModule,
+	keepable: boolean,
+): RuneRuleChain {
+	const required = !keepable && c.nullable !== true && c.default === undefined;
+	let chain: RuneRuleChain = NUMBER_COLUMN_TYPES.has(type)
+		? rune.rules.number().parse(parseNumeric)
+		: JSON_COLUMN_TYPES.has(type)
+			? rune.rules.any()
+			: rune.rules.string();
+	if (!required) {
+		chain = chain.optional();
+		if (c.nullable === true) chain = chain.nullable();
+	}
+	return chain;
 }
 
 /**
@@ -611,14 +644,19 @@ export function deriveWritableSchema(
  * preserving the old `filterWritableBody` checkbox semantics, then runs rune's
  * synchronous, never-throwing `validateResult()`. On success `result.data` holds only
  * declared-column keys (mass-assignment inherent). Exported for the unit tests
- * that pin the coercion CRUX.
+ * that pin the coercion CRUX. A blank `writeOnly` value counts as not
+ * submitted: the form never pre-fills those, so blank means "unchanged".
  */
 export function validateWritableBody(
 	schema: RuneSchema,
 	booleanKeys: ReadonlySet<string>,
 	body: Record<string, unknown>,
+	writeOnly: ReadonlySet<string> = new Set(),
 ): RuneValidationResult {
 	const input: Record<string, unknown> = { ...body };
+	for (const key of writeOnly) {
+		if (input[key] === "") delete input[key];
+	}
 	for (const key of booleanKeys) {
 		if (!(key in input)) input[key] = false;
 	}
@@ -668,9 +706,6 @@ function fieldErrors(
 /** Session flash key under which the per-field validation errors are stashed (AdonisJS `flashMessages.errors` parity). */
 const FLASH_ERRORS_KEY = "errors";
 
-/** Column propertyKeys whose values are secrets — never flashed to the session nor echoed back into HTML (AdonisJS parity). */
-const SENSITIVE_KEY_RE = /password|passwd|secret|token|apikey/i;
-
 /**
  * The subset of a submitted body safe to re-surface on a validation error:
  * declared columns only — so `_csrf`, `_method`, and any mass-assignment /
@@ -684,7 +719,7 @@ function flashableInput(
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const c of columns) {
-		if (SENSITIVE_KEY_RE.test(c.propertyKey)) continue;
+		if (isSecretColumn(c)) continue;
 		if (c.propertyKey in submitted)
 			out[c.propertyKey] = submitted[c.propertyKey];
 	}
@@ -1398,8 +1433,13 @@ export default class StationProvider {
 	 * `@c9up/rune` — so an undefined here is an internal invariant break; throw
 	 * loud (fail-closed) rather than silently accept an unvalidated body.
 	 */
-	#requireWritableSchema(resource: Resource): RuneSchema {
-		const { writableSchema } = this.#requireContext(resource);
+	#requireWritableSchema(
+		resource: Resource,
+		mode: "create" | "update",
+	): RuneSchema {
+		const context = this.#requireContext(resource);
+		const writableSchema =
+			mode === "create" ? context.writableSchema : context.updateSchema;
 		if (writableSchema === undefined) {
 			throw new Error(
 				`[station] No validation schema for ${resource.entity.name} — @c9up/rune must be installed to accept admin writes.`,
@@ -1449,8 +1489,8 @@ export default class StationProvider {
 		// Echo only declared, non-sensitive columns back to the form — never
 		// `_csrf`, secrets, or mass-assignment keys (both the flash store and the
 		// re-rendered HTML). An empty result falls back to `row`.
-		const { columns, pkColumn } = this.#requireContext(resource);
-		const safe = flashableInput(submitted, columns);
+		const { formColumns, pkColumn, writeOnly } = this.#requireContext(resource);
+		const safe = flashableInput(submitted, formColumns);
 		if (ctx.session !== undefined) {
 			// AdonisJS PRG: flash old input + errors, redirect back to the form.
 			ctx.session.flashAll(safe);
@@ -1462,8 +1502,9 @@ export default class StationProvider {
 		// submitted values + errors are still shown rather than silently dropped.
 		const vm = buildFormViewModel({
 			resource,
-			columns,
+			columns: formColumns,
 			pkColumn,
+			writeOnly,
 			row,
 			values: Object.keys(safe).length > 0 ? safe : undefined,
 			errors: fieldErrors(errors),
@@ -1479,7 +1520,7 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			const { repo, listColumns, pkColumn } = this.#requireContext(resource);
 			// 56.5: the list action is gated behind `<resource>.list` like
 			// every other action — resolved through the Warden `"auth"`
 			// layer. (Retro 2026-06-01: list previously skipped the gate
@@ -1521,7 +1562,7 @@ export default class StationProvider {
 			const viewModel = buildListViewModel({
 				resource,
 				rows: result.all(),
-				columns,
+				columns: listColumns,
 				pkColumn,
 				page: result.meta.currentPage,
 				perPage: result.meta.perPage,
@@ -1538,7 +1579,7 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			const { repo, showColumns, pkColumn } = this.#requireContext(resource);
 			// Authorize BEFORE the existence check so an unauthorized caller
 			// can't distinguish 404 (absent) from 403 (exists) — no row-existence
 			// oracle for a user without `<resource>.show`.
@@ -1558,7 +1599,7 @@ export default class StationProvider {
 			const viewModel = buildShowViewModel({
 				resource,
 				row,
-				columns,
+				columns: showColumns,
 				pkColumn,
 			});
 			const html = await this.#renderView(ctx, "station::show", viewModel);
@@ -1571,7 +1612,8 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { columns, pkColumn } = this.#requireContext(resource);
+			const { formColumns, pkColumn, writeOnly } =
+				this.#requireContext(resource);
 			if (
 				!(await authorizeAction(resource, "create", ctx, this.#authManager))
 			) {
@@ -1580,11 +1622,12 @@ export default class StationProvider {
 			}
 			// 57.7 — after a failed create redirected back (PRG), the flash carries
 			// the old input + per-field errors; re-populate + surface them.
-			const { values, errors } = readFlash(ctx, columns);
+			const { values, errors } = readFlash(ctx, formColumns);
 			const vm = buildFormViewModel({
 				resource,
-				columns,
+				columns: formColumns,
 				pkColumn,
+				writeOnly,
 				values,
 				errors,
 				csrfEnabled: ctx.store?.get("csrfToken") != null,
@@ -1607,7 +1650,7 @@ export default class StationProvider {
 				denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns, booleanKeys } =
+			const { repo, pkColumn, columns, booleanKeys, writeOnly } =
 				this.#requireContext(resource);
 			if (
 				!(await authorizeAction(resource, "create", ctx, this.#authManager))
@@ -1617,14 +1660,16 @@ export default class StationProvider {
 			}
 			const body = await readBody(ctx);
 			// 57.7 — validate + mass-assignment guard in one pass. `result.data`
-			// holds ONLY declared-column keys, so an attacker's `{ role: "admin" }`
-			// / `{ passwordHash: "x" }` / PK / timestamps are never present (dropped
-			// by the schema, not a separate filter), and each field is type-checked.
+			// holds ONLY editable-column keys (the allow-list: `editable`, or every
+			// non-secret, non-hidden, non-framework column), so a forged `isAdmin`
+			// on a hidden column, a secret column, the PK or a timestamp is dropped
+			// by the schema, and each field is type-checked.
 			// Invalid input fail-closes with a 422 BEFORE any repository write (AC4).
 			const result = validateWritableBody(
-				this.#requireWritableSchema(resource),
+				this.#requireWritableSchema(resource, "create"),
 				booleanKeys,
 				body,
+				writeOnly,
 			);
 			if (!result.valid) {
 				// PRG fallback URL = the create form (AdonisJS `redirect().back()`).
@@ -1649,7 +1694,8 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, columns, pkColumn } = this.#requireContext(resource);
+			const { repo, formColumns, pkColumn, writeOnly } =
+				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
 				deny(ctx);
@@ -1667,11 +1713,12 @@ export default class StationProvider {
 			// 57.7 — after a failed update redirected back (PRG), the flash carries
 			// the submitted values + errors; they win over the DB `row` so the user
 			// sees what they typed. A normal edit GET has no flash → fields from row.
-			const { values, errors } = readFlash(ctx, columns);
+			const { values, errors } = readFlash(ctx, formColumns);
 			const vm = buildFormViewModel({
 				resource,
-				columns,
+				columns: formColumns,
 				pkColumn,
+				writeOnly,
 				row,
 				values,
 				errors,
@@ -1692,7 +1739,7 @@ export default class StationProvider {
 				denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns, booleanKeys } =
+			const { repo, pkColumn, columns, booleanKeys, writeOnly } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (!(await authorizeAction(resource, "edit", ctx, this.#authManager))) {
@@ -1715,9 +1762,10 @@ export default class StationProvider {
 			// 422 with the submitted values + per-field errors (the existing entity
 			// still supplies the id/action).
 			const result = validateWritableBody(
-				this.#requireWritableSchema(resource),
+				this.#requireWritableSchema(resource, "update"),
 				booleanKeys,
 				body,
+				writeOnly,
 			);
 			if (!result.valid) {
 				// PRG fallback URL = this row's edit form (AdonisJS `redirect().back()`).
@@ -2163,22 +2211,48 @@ function buildResourceContext(
 		atlas.getRelationMetadata(resource.entity).map((r) => r.propertyKey),
 	);
 	if (atlas.hasSoftDeletes(resource.entity)) excludedProps.add("deletedAt");
+	const listColumns = viewColumns(
+		columns,
+		resource.list.columns,
+		resource,
+		"list.columns",
+	);
+	const showColumns = viewColumns(
+		columns,
+		resource.show.columns,
+		resource,
+		"show.columns",
+	);
+	const formColumns = editableColumns(
+		columns,
+		resource,
+		pkColumn,
+		autoManaged,
+		excludedProps,
+	);
+	const writeOnly = writeOnlyKeys(formColumns, resource);
 	const derived =
 		rune === null
 			? undefined
 			: deriveWritableSchema(
-					columns,
+					formColumns,
 					pkColumn,
 					autoManaged,
 					excludedProps,
 					rune,
+					writeOnly,
 				);
 	return {
 		repo,
 		columns,
+		listColumns,
+		showColumns,
+		formColumns,
+		writeOnly,
 		pkColumn,
 		autoManaged,
 		writableSchema: derived?.schema,
+		updateSchema: derived?.updateSchema,
 		booleanKeys: derived?.booleanKeys ?? new Set<string>(),
 	};
 }

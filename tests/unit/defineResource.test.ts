@@ -172,4 +172,27 @@ describe("defineResource", () => {
 			/must be lowercase kebab-case.+'a--b'/,
 		);
 	});
+
+	it("freezes the list/show/editable allow-lists and rejects malformed ones", () => {
+		class Account {}
+		const resource = defineResource({
+			entity: Account,
+			list: { columns: ["email"] },
+			editable: ["email"],
+		});
+		expect(resource.list.columns).toEqual(["email"]);
+		expect(resource.show.columns).toBeUndefined();
+		expect(Object.isFrozen(resource.editable)).toBe(true);
+		expect(() => defineResource({ entity: Account, editable: [""] })).toThrow(
+			/'editable' must be an array of column names/,
+		);
+		expect(() =>
+			defineResource(
+				bypassTypeCheck<ResourceOptions<unknown>>({
+					entity: Account,
+					show: { columns: "email" },
+				}),
+			),
+		).toThrow(/'show.columns' must be an array/);
+	});
 });

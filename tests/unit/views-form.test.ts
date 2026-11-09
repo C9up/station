@@ -215,3 +215,40 @@ describe("station > views > buildFormViewModel (edit)", () => {
 		expect(field(vm.fields, "age")?.error).toBe("");
 	});
 });
+
+describe("station > views > buildFormViewModel (secrets, bug 209)", () => {
+	const row = { id: 7, password: "$argon2id$HASH", pin: "1234", name: "n" };
+
+	it("never pre-fills a password input, whatever the source", () => {
+		const resource = defineResource({
+			entity: class User {},
+			formFields: { pin: { inputType: "password" } },
+		});
+		const vm = buildFormViewModel({
+			resource,
+			columns: cols(
+				{ propertyKey: "password" },
+				{ propertyKey: "pin" },
+				{ propertyKey: "name" },
+			),
+			pkColumn: "id",
+			row,
+			values: { password: "typed", pin: "9999", name: "typed-name" },
+		});
+		expect(field(vm.fields, "password")?.value).toBe("");
+		expect(field(vm.fields, "pin")?.value).toBe("");
+		expect(field(vm.fields, "name")?.value).toBe("typed-name");
+	});
+
+	it("renders a writeOnly text field empty", () => {
+		const vm = buildFormViewModel({
+			resource: userResource,
+			columns: cols({ propertyKey: "apiKey" }, { propertyKey: "name" }),
+			pkColumn: "id",
+			row: { id: 7, apiKey: "live_key", name: "n" },
+			writeOnly: new Set(["apiKey"]),
+		});
+		expect(field(vm.fields, "apiKey")?.value).toBe("");
+		expect(field(vm.fields, "name")?.value).toBe("n");
+	});
+});

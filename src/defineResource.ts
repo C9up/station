@@ -18,6 +18,26 @@ function isResourceAction(value: unknown): value is ResourceAction {
 }
 
 /**
+ * Shape-check a column allow-list. Whether each name is a real column is
+ * checked at mount, where the entity metadata is known.
+ */
+function columnList(
+	value: ReadonlyArray<string> | undefined,
+	option: string,
+): ReadonlyArray<string> | undefined {
+	if (value === undefined) return undefined;
+	if (
+		!Array.isArray(value) ||
+		!value.every((v) => typeof v === "string" && v.length > 0)
+	) {
+		throw new TypeError(
+			`[station] defineResource: '${option}' must be an array of column names`,
+		);
+	}
+	return Object.freeze([...value]);
+}
+
+/**
  * Build a frozen `Resource` from a developer's declaration.
  *
  * Validation is fail-fast and pre-HTTP: a typo in `actions` or `name` throws
@@ -89,6 +109,14 @@ export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 		formFields[field] = override;
 	}
 
+	const list = Object.freeze({
+		columns: columnList(options.list?.columns, "list.columns"),
+	});
+	const show = Object.freeze({
+		columns: columnList(options.show?.columns, "show.columns"),
+	});
+	const editable = columnList(options.editable, "editable");
+
 	// 54.6: audit sink shape-check — if provided, must be callable. No
 	// extra validation; the sink is exercised lazily on first write.
 	let audit: AuditSink | undefined;
@@ -120,6 +148,9 @@ export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 		audit,
 		onAuditError,
 		formFields: Object.freeze(formFields),
+		list,
+		show,
+		editable,
 	};
 
 	return Object.freeze(resource);

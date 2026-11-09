@@ -49,6 +49,12 @@ export interface FormPageInput {
 	/** Validation errors keyed by column propertyKey. */
 	errors?: Readonly<Record<string, string>>;
 	/**
+	 * Fields rendered empty whatever their stored or submitted value (secrets).
+	 * A `password` input is always treated this way: a credential, even a hash,
+	 * is never shipped back inside the page.
+	 */
+	writeOnly?: ReadonlySet<string>;
+	/**
 	 * Whether the host has a CSRF token in the per-request store. When true the
 	 * template emits `{{ csrfField() }}`; the handler derives it from
 	 * `ctx.store` (57.3). Replaces the old `hiddenInputs?` array.
@@ -87,8 +93,16 @@ export type FormViewModel = {
 };
 
 export function buildFormViewModel(input: FormPageInput): FormViewModel {
-	const { resource, columns, pkColumn, row, values, errors, csrfEnabled } =
-		input;
+	const {
+		resource,
+		columns,
+		pkColumn,
+		row,
+		values,
+		errors,
+		csrfEnabled,
+		writeOnly,
+	} = input;
 	const isEdit = row !== undefined;
 	const slug = encodeURIComponent(resource.name);
 	const id = isEdit ? String(row[pkColumn] ?? "") : "";
@@ -108,7 +122,13 @@ export function buildFormViewModel(input: FormPageInput): FormViewModel {
 			(c) => !shouldSkipColumn(c, pkColumn, resource.formFields[c.propertyKey]),
 		)
 		.map((c) =>
-			buildField(c, values ?? row, errors, resource.formFields[c.propertyKey]),
+			buildField(
+				c,
+				values ?? row,
+				errors,
+				resource.formFields[c.propertyKey],
+				writeOnly?.has(c.propertyKey) === true,
+			),
 		);
 
 	return {
@@ -128,10 +148,12 @@ function buildField(
 	source: Readonly<Record<string, unknown>> | undefined,
 	errors: Readonly<Record<string, string>> | undefined,
 	override: FormFieldOverride | undefined,
+	writeOnly: boolean,
 ): FormField {
 	const inputType = override?.inputType ?? inferInputType(c);
 	const name = c.propertyKey;
-	const rawValue = source?.[name];
+	const rawValue =
+		writeOnly || inputType === "password" ? undefined : source?.[name];
 	const isCheckbox = inputType === "checkbox";
 	const value =
 		rawValue === undefined || rawValue === null ? "" : String(rawValue);

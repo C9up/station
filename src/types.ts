@@ -33,7 +33,10 @@ export type AuditSink = (event: AuditEvent) => void | Promise<void>;
  * others.
  */
 export interface FormFieldOverride {
-	/** Hide the field from the form entirely (still rendered on show). */
+	/**
+	 * Hide the field from the form. A hidden field is not writable either: a
+	 * body carrying it is ignored and a hidden boolean keeps its stored value.
+	 */
 	hidden?: boolean;
 	/** Override the rendered `<input type>`. */
 	inputType?:
@@ -51,6 +54,15 @@ export interface FormFieldOverride {
 	placeholder?: string;
 	/** Mark the field as required at the HTML level. */
 	required?: boolean;
+}
+
+/** Per-view options for the list and show pages. */
+export interface ResourceViewOptions {
+	/**
+	 * The columns the view renders, in this order. When omitted, every column
+	 * except secrets (`serializeAs: null` or a credential-like name) is shown.
+	 */
+	columns?: ReadonlyArray<string>;
 }
 
 export interface ResourceOptions<TEntity> {
@@ -86,6 +98,18 @@ export interface ResourceOptions<TEntity> {
 	 * the inferred defaults.
 	 */
 	formFields?: Readonly<Record<string, FormFieldOverride>>;
+	/** Columns of the list page. */
+	list?: ResourceViewOptions;
+	/** Columns of the show page. */
+	show?: ResourceViewOptions;
+	/**
+	 * The columns a create/edit may set, and the fields the form shows. When
+	 * omitted: every column except the framework-managed ones, secrets
+	 * (`serializeAs: null` or a credential-like name) and `formFields` marked
+	 * `hidden`. A secret listed here is write-only: the form renders it empty
+	 * and an empty submission keeps the stored value.
+	 */
+	editable?: ReadonlyArray<string>;
 }
 
 export interface Resource<TEntity = unknown> {
@@ -105,4 +129,10 @@ export interface Resource<TEntity = unknown> {
 	readonly onAuditError?: (event: AuditEvent, error: unknown) => void;
 	/** Frozen per-field overrides for the inferred form (Story 54.5). */
 	readonly formFields: Readonly<Record<string, FormFieldOverride>>;
+	/** Frozen list-page options. */
+	readonly list: Readonly<ResourceViewOptions>;
+	/** Frozen show-page options. */
+	readonly show: Readonly<ResourceViewOptions>;
+	/** Frozen editable allow-list; undefined means the default set. */
+	readonly editable?: ReadonlyArray<string>;
 }
