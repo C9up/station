@@ -1350,17 +1350,23 @@ export default class StationProvider {
 					`/admin/${slug}/:id`,
 					gate(this.#buildUpdateHandler(resource)),
 				);
-				// Browser forms can't issue PUT — accept POST with `_method=PUT`
-				// from the auto-generated form (form.ts stamps the hidden input).
-				router.post(
-					`/admin/${slug}/:id`,
-					gate(this.#buildMethodOverrideHandler(resource)),
-				);
 			}
 			if (resource.actions.includes("destroy")) {
 				router.delete(
 					`/admin/${slug}/:id`,
 					gate(this.#buildDestroyHandler(resource)),
+				);
+			}
+			// Browser forms can't issue PUT/DELETE — accept POST with `_method`
+			// from the auto-generated form (form.ts stamps the hidden input),
+			// dispatching only to the actions this resource enables.
+			if (
+				resource.actions.includes("edit") ||
+				resource.actions.includes("destroy")
+			) {
+				router.post(
+					`/admin/${slug}/:id`,
+					gate(this.#buildMethodOverrideHandler(resource)),
 				);
 			}
 		}
@@ -1810,10 +1816,19 @@ export default class StationProvider {
 		// Browser forms can only emit GET / POST. The auto-generated edit
 		// form ships `<input type="hidden" name="_method" value="PUT">`
 		// so the POST /admin/:r/:id endpoint can route to the update
-		// handler. A POST without `_method=PUT` (or with `_method=DELETE`)
-		// dispatches accordingly.
-		const updateHandler = this.#buildUpdateHandler(resource);
-		const destroyHandler = this.#buildDestroyHandler(resource);
+		// handler. Only the enabled actions get a handler: an override naming a
+		// disabled one is refused like any unsupported method, so `actions`
+		// stays the boundary of what the admin can do to a resource.
+		const updateHandler = resource.actions.includes("edit")
+			? this.#buildUpdateHandler(resource)
+			: undefined;
+		const destroyHandler = resource.actions.includes("destroy")
+			? this.#buildDestroyHandler(resource)
+			: undefined;
+		const allowed = [
+			...(updateHandler === undefined ? [] : ["PUT", "PATCH"]),
+			...(destroyHandler === undefined ? [] : ["DELETE"]),
+		];
 		return async (ctx) => {
 			// Fail-close on CSRF before reading the body (see #buildCreateHandler).
 			// The PUT/DELETE branches delegate to already-guarded handlers, but the
@@ -1825,18 +1840,21 @@ export default class StationProvider {
 			}
 			const body = await readBody(ctx);
 			const override = String(body._method ?? "").toUpperCase();
-			if (override === "PUT" || override === "PATCH") {
+			if (
+				updateHandler !== undefined &&
+				(override === "PUT" || override === "PATCH")
+			) {
 				return updateHandler(ctx);
 			}
-			if (override === "DELETE") {
+			if (destroyHandler !== undefined && override === "DELETE") {
 				return destroyHandler(ctx);
 			}
-			// Unsupported override — refuse rather than silently downgrade
-			// to a no-op so misconfigured forms surface immediately.
+			// Unsupported or disabled override — refuse rather than silently
+			// downgrade to a no-op so misconfigured forms surface immediately.
 			ctx.response.status(405);
 			ctx.response.type("text/html; charset=utf-8");
 			ctx.response.send(
-				`<h1>405 Method Not Allowed</h1><p>POST /admin/${escapeMin(resource.name)}/:id requires <code>_method=PUT</code> or <code>_method=DELETE</code>.</p>`,
+				`<h1>405 Method Not Allowed</h1><p>POST /admin/${escapeMin(resource.name)}/:id accepts <code>_method</code> = ${escapeMin(allowed.join(" | "))}.</p>`,
 			);
 		};
 	}
