@@ -79,6 +79,7 @@ export interface HttpContextLike {
 	params: Record<string, string>;
 	auth?: { user?: { id: unknown; [key: string]: unknown }; roles?: string[] };
 	store?: { get(key: string): unknown };
+	session?: Record<string, unknown>;
 }
 
 export interface CtxOptions {

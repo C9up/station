@@ -82,9 +82,10 @@ interface StationHttpContext {
 	request: {
 		qs(): Record<string, string | undefined>;
 		body?(): Promise<unknown> | unknown;
-		url?(): string;
 		header?(name: string): string | undefined;
 		cookie?(name: string): string | undefined;
+		/** `:authority` or `Host` — never a forwarded host (AdonisJS `authority`). */
+		authority?(): string | null;
 		/** Client IP as the host resolved it (trusted-proxy aware in ream). */
 		ip?(): string;
 		/** Whether the request came over HTTPS (trusted-proxy aware in ream). */
@@ -819,44 +820,50 @@ function readFlash(
 }
 
 /**
- * Same-origin / relative check for a `Referer` — replicates ream's
- * `RedirectBuilder.back()` open-redirect guard (Station consumes the response
- * through its own `redirect(url)` seam and can't reach ream's builder). A
- * relative path is trusted; an absolute URL only when its origin matches the
- * request URL. Anything else is untrusted → the caller uses its safe fallback.
+ * The path a `Referer` points back to, when it may be trusted — AdonisJS's
+ * `isValidRedirectUrl` + `redirect().back()`: a relative path is trusted, an
+ * absolute URL only when its host is the request's own authority (`Host` /
+ * `:authority`, never a forwarded host), and the redirect goes to the path
+ * alone. Comparing with `request.url()` could never work: in ream that is
+ * the path, while a browser's Referer is a full URL. Deliberately stricter
+ * than upstream in one place: with no authority to compare against, an
+ * absolute Referer is refused rather than accepted.
  */
-function isSameOriginReferer(referer: string, requestUrl?: string): boolean {
+function trustedRefererPath(
+	referer: string,
+	authority: string | null | undefined,
+): string | undefined {
 	// A relative path is trusted only when it starts with a single "/" and
 	// contains no backslash: browsers normalise "\\" to "/", so "/\\evil.com"
 	// becomes the protocol-relative "//evil.com" that a lone `!startsWith("//")`
 	// check would let through.
-	if (
-		referer.startsWith("/") &&
-		!referer.startsWith("//") &&
-		!referer.includes("\\")
-	) {
-		return true;
-	}
-	if (requestUrl === undefined) return false;
+	if (referer.startsWith("//") || referer.includes("\\")) return undefined;
 	try {
-		return new URL(referer).origin === new URL(requestUrl).origin;
+		if (referer.startsWith("/")) {
+			const url = new URL(referer, "http://localhost");
+			return url.host === "localhost" ? url.pathname : undefined;
+		}
+		if (authority === null || authority === undefined || authority === "") {
+			return undefined;
+		}
+		const url = new URL(referer);
+		return url.host === authority ? url.pathname : undefined;
 	} catch {
-		return false;
+		return undefined;
 	}
 }
 
 /**
- * `redirect().back()` over Station's `redirect(url)` seam (57.7): prefer a
- * trusted same-origin `Referer`, else the caller's `fallback` (the form URL) —
- * the same behaviour as ream's `RedirectBuilder.back(fallback)`, open-redirect
- * safe.
+ * `redirect().back()` over Station's `redirect(url)` seam (57.7): the path of a
+ * trusted `Referer`, else the caller's `fallback` (the form URL).
  */
 function redirectBack(ctx: StationHttpContext, fallback: string): void {
 	const referer = ctx.request.header?.("referer");
+	const authority =
+		ctx.request.authority?.() ?? ctx.request.header?.("host") ?? undefined;
 	const target =
-		typeof referer === "string" &&
-		isSameOriginReferer(referer, ctx.request.url?.())
-			? referer
+		typeof referer === "string"
+			? (trustedRefererPath(referer, authority) ?? fallback)
 			: fallback;
 	ctx.response.redirect(target);
 }
