@@ -36,7 +36,7 @@ import {
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
-import { inProduction } from "./vendor/nodeEnv.js";
+import { inProduction, normalizeNodeEnv } from "./vendor/nodeEnv.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
 import { buildFormViewModel } from "./views/form.js";
@@ -1246,15 +1246,23 @@ export default class StationProvider {
 
 		// An admin panel with no auth is full CRUD on every registered resource
 		// for anyone who can reach the route. That is a different product, and
-		// in production it has to be asked for rather than fallen into — the
-		// same bet bay makes about losing a job on a Redis without LMOVE.
+		// it has to be asked for rather than fallen into — the same bet bay
+		// makes about losing a job on a Redis without LMOVE.
 		//
 		// `requireAuth: false` written down IS the asking. Defaulted (undefined)
-		// is not: it means nobody decided, and nobody deciding must not be how
-		// an unauthenticated admin reaches production.
-		if (inProduction() && userConfig.requireAuth !== false) {
+		// is not: it means nobody decided, and nobody deciding is only tolerated
+		// on a machine positively named development or test. An unset NODE_ENV,
+		// `staging`, `preview`… fail closed like production: they are exactly
+		// the boxes nobody configured, and staging often holds a copy of
+		// production data (ream's `Application.inDev` takes the same stance).
+		const env = normalizeNodeEnv(process.env.NODE_ENV);
+		const devOrTest = env === "development" || env === "test";
+		if (!devOrTest && userConfig.requireAuth !== false) {
+			const where = inProduction()
+				? "production"
+				: `a non-development environment (NODE_ENV=${process.env.NODE_ENV === undefined ? "unset" : JSON.stringify(process.env.NODE_ENV)})`;
 			throw new Error(
-				"[station] Admin routes would mount with NO authorisation in production: " +
+				`[station] Admin routes would mount with NO authorisation in ${where}: ` +
 					"no working `auth` binding is registered, so every `/admin/*` route — " +
 					"including create, update and delete — is open to anyone who can reach it.\n" +
 					"  Wire @c9up/warden's WardenProvider, or set `station.requireAuth: false` " +
@@ -1267,11 +1275,13 @@ export default class StationProvider {
 		// Said even when the deployment opted in: agreeing once in a config file
 		// is not the same as being reminded that this process is running that
 		// way. The line has to be in the logs of the incident.
-		const optedIn = inProduction() && userConfig.requireAuth === false;
+		const optedIn = !devOrTest && userConfig.requireAuth === false;
+		const envName =
+			env === "unknown" ? "AN UNCONFIGURED ENVIRONMENT" : env.toUpperCase();
 		console.warn(
-			"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action `<resource>.<action>` permissions in the Warden rights store BEFORE production. See https://ream.dev/modules/station#auth." +
+			"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action admin permissions in the Warden rights store BEFORE production. See https://ream.dev/modules/station#auth." +
 				(optedIn
-					? "\n  Running this way in PRODUCTION because `station.requireAuth: false` was set."
+					? `\n  Running this way in ${envName} because \`station.requireAuth: false\` was set.`
 					: ""),
 		);
 	}

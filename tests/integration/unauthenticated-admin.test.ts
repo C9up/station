@@ -119,4 +119,28 @@ describe("station > an admin with no auth binding", () => {
 		await expect(mount({})).resolves.toBeUndefined();
 		expect(warn.mock.calls.flat().join(" ")).toContain("mounted without auth");
 	});
+
+	// Bug 212: only an environment positively named development or test may
+	// fall into an open admin; an unset or unknown NODE_ENV fails closed.
+	for (const env of [undefined, "staging", "preview", "qa"]) {
+		it(`refuses when NODE_ENV is ${env ?? "unset"}`, async () => {
+			if (env === undefined) delete process.env.NODE_ENV;
+			else process.env.NODE_ENV = env;
+
+			await expect(mount({})).rejects.toThrow(/NO authorisation/);
+		});
+	}
+
+	it("mounts under NODE_ENV=test", async () => {
+		process.env.NODE_ENV = "test";
+
+		await expect(mount({})).resolves.toBeUndefined();
+	});
+
+	it("mounts in staging when requireAuth: false says so, and names it", async () => {
+		process.env.NODE_ENV = "staging";
+
+		await expect(mount({ requireAuth: false })).resolves.toBeUndefined();
+		expect(warn.mock.calls.flat().join(" ")).toContain("STAGING");
+	});
 });
