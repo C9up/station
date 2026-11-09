@@ -1672,6 +1672,20 @@ export default class StationProvider {
 			// Station keeps only the `MAX_PER_PAGE` clamp (above) and the
 			// redirect-to-last-page wrapper — atlas floors perPage to ≥1 but
 			// does not cap it.
+			// Past this page `(page-1)*perPage` is no longer an exact integer:
+			// atlas / the driver reject that offset, which surfaced as a 500.
+			// No table that size exists, so such a page is past the end — count
+			// through page 1 and send the caller to the real last page.
+			if (page > Math.floor(Number.MAX_SAFE_INTEGER / perPage) + 1) {
+				const first = await repo
+					.query()
+					.orderBy(pkColumn, "desc")
+					.paginate(1, perPage);
+				ctx.response.redirect(
+					`/admin/${resource.name}?page=${Math.max(1, first.meta.lastPage)}&perPage=${perPage}`,
+				);
+				return;
+			}
 			const result = await repo
 				.query()
 				.orderBy(pkColumn, "desc")
