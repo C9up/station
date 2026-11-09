@@ -2266,11 +2266,11 @@ export default class StationProvider {
 					}
 				}
 			}
-			const qs = ctx.request.qs();
-			const errorParam = qs.error;
+			// No `?error=` read: Station never redirects with one (a failed POST
+			// re-renders inline), so its only use was a third party writing
+			// arbitrary text into the sign-in page's alert.
 			const vm = buildLoginViewModel({
 				action: this.#authConfig.loginPath,
-				error: typeof errorParam === "string" ? errorParam : undefined,
 				csrfEnabled: ctx.store?.get("csrfToken") != null,
 			});
 			const html = await this.#renderView(ctx, "station::login", vm);

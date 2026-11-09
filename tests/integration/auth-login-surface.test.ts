@@ -8,7 +8,7 @@
  * `list-show-roundtrip.test.ts`) — no Ignitor / HyperServer boot.
  *
  * Coverage:
- *   - GET /admin/login renders the form (200, escapes ?error=)
+ *   - GET /admin/login renders the form (200, never reflects ?error=)
  *   - POST /admin/login with bad creds → 401, form re-rendered, NO cookie
  *   - POST /admin/login with good creds → 302 /admin, session cookie set
  *   - POST /admin/logout → clears cookie, redirects to login
@@ -380,23 +380,28 @@ describe("station > integration > 54.7 warden integration + login surface", () =
 		).toBeDefined();
 	});
 
-	it("GET /admin/login renders the form and HTML-escapes ?error=", async () => {
+	it("GET /admin/login renders the form and never reflects ?error= (bug 219)", async () => {
 		const { manager } = buildFakeAuth({});
 		const { routes } = await bootStation({ auth: manager });
 		const loginGet = routes.find(
 			(r) => r.method === "get" && r.path === "/admin/login",
 		);
 		if (!loginGet) throw new Error("unreachable");
-		const { ctx, res } = buildCtx({
-			query: { error: "<script>x</script>" },
-		});
-		await loginGet.handler(ctx);
-		expect(res.contentType).toBe("text/html; charset=utf-8");
-		expect(res.body).toContain('name="email"');
-		expect(res.body).toContain('name="password"');
-		// Error was HTML-escaped, raw <script> never reaches the page.
-		expect(res.body).not.toContain("<script>x</script>");
-		expect(res.body).toContain("&lt;script&gt;x&lt;/script&gt;");
+		for (const error of [
+			"<script>x</script>",
+			"Session expired. Re-verify at https://evil.example/login",
+		]) {
+			const { ctx, res } = buildCtx({ query: { error } });
+			await loginGet.handler(ctx);
+			expect(res.contentType).toBe("text/html; charset=utf-8");
+			expect(res.body).toContain('name="email"');
+			expect(res.body).toContain('name="password"');
+			// Only messages Station produced reach the alert slot; a third
+			// party's link cannot put text in it, escaped or not.
+			expect(res.body).not.toContain('role="alert"');
+			expect(res.body).not.toContain("evil.example");
+			expect(res.body).not.toContain("script");
+		}
 	});
 
 	it("POST /admin/login with bad creds → 401, form re-rendered, NO cookie set", async () => {

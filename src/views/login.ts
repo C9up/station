@@ -7,8 +7,8 @@
  *
  * Pure `(input) => LoginViewModel` builder (Story 57.3): every value reaches
  * HTML through `templates/login.inker`'s `{{ }}` auto-escape (the retired
- * `escape.ts` no longer runs here), so a tampered `?error=…` query parameter
- * cannot smuggle markup into the page. The CSRF hidden input is emitted by
+ * `escape.ts` no longer runs here). `error` only ever carries a message
+ * Station produced; the handler never reads it from the URL. The CSRF hidden input is emitted by
  * inker's canonical `{{ csrfField() }}` helper, guarded by the precomputed
  * `csrfEnabled` boolean.
  */
