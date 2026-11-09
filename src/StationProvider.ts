@@ -41,7 +41,13 @@ import {
 } from "./loginLimiter.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
-import type { AuditEvent, Resource, ResourceAction } from "./types.js";
+import type {
+	AuditEvent,
+	Resource,
+	ResourceAction,
+	SecurityAuditEvent,
+	SecurityAuditSink,
+} from "./types.js";
 import { inProduction, normalizeNodeEnv } from "./vendor/nodeEnv.js";
 // note: AuditEvent + ResourceAction are used by the CRUD handlers below;
 // the imports stay in one block for clarity.
@@ -84,6 +90,10 @@ interface StationHttpContext {
 		body?(): Promise<unknown> | unknown;
 		header?(name: string): string | undefined;
 		cookie?(name: string): string | undefined;
+		/** The request path (ream's `url()` without the query string). */
+		url?(): string;
+		/** `X-Request-Id`, when the proxy or client set one (AdonisJS `id`). */
+		id?(): string | undefined;
 		/** `:authority` or `Host` — never a forwarded host (AdonisJS `authority`). */
 		authority?(): string | null;
 		/** Client IP as the host resolved it (trusted-proxy aware in ream). */
@@ -515,6 +525,13 @@ export interface StationConfig {
 	loginRateLimit?: StationLoginRateLimitConfig | false;
 	/** Named router middleware attached to every route Station mounts. */
 	middleware?: ReadonlyArray<string>;
+	/**
+	 * Sink for the admin's security events: sign-in success, failure and
+	 * throttling, logout, authorization denials and CSRF blocks, each with the
+	 * client IP and request id. Write events keep going to each resource's
+	 * own `audit`.
+	 */
+	audit?: SecurityAuditSink;
 }
 
 const MAX_PER_PAGE = 100;
@@ -969,6 +986,7 @@ export default class StationProvider {
 	#authManager: WardenAuthManager | undefined;
 	#loginLimiter: StationLoginLimiter | undefined;
 	#cookieSecure: boolean | undefined;
+	#securityAudit: SecurityAuditSink | undefined;
 	#authConfig: Required<Pick<StationConfig, "loginPath" | "cookieName">> & {
 		requireAuth: boolean;
 		requireRole: string | undefined;
@@ -1031,6 +1049,13 @@ export default class StationProvider {
 		const router = withRouteMiddleware(peers.router, userConfig.middleware);
 		this.#loginLimiter = buildLoginLimiter(userConfig.loginRateLimit);
 		this.#cookieSecure = userConfig.cookieSecure;
+		if (
+			userConfig.audit !== undefined &&
+			typeof userConfig.audit !== "function"
+		) {
+			throw new TypeError("[station] `station.audit` must be a function");
+		}
+		this.#securityAudit = userConfig.audit;
 
 		// Phase 1a2 — resolve the SHARED inker renderer (AdonisJS/Edge parity)
 		// and mount Station's package templates as the `station` disk. Unlike
@@ -1486,7 +1511,7 @@ export default class StationProvider {
 
 	/**
 	 * 56.5 — every admin action is now gated behind a
-	 * `<resource>.<action>` permission resolved through @c9up/warden
+	 * `<prefix>.<resource>.<action>` permission resolved through @c9up/warden
 	 * (`auth.hasPermission`). Warn ONCE at boot, only when the auth layer
 	 * is wired, that the host must seed roles/grants in the Warden rights
 	 * store — otherwise every admin request 403s with no hint. The old
@@ -1650,18 +1675,7 @@ export default class StationProvider {
 			// every other action — resolved through the Warden `"auth"`
 			// layer. (Retro 2026-06-01: list previously skipped the gate
 			// entirely, leaking the index regardless of authorization.)
-			if (
-				!(await authorizeAction(
-					resource,
-					"list",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "list"))) return;
 			const qs = ctx.request.qs();
 			const page = clampPositiveInt(qs.page, 1);
 			const perPageRaw = clampPositiveInt(qs.perPage, DEFAULT_PER_PAGE);
@@ -1730,18 +1744,7 @@ export default class StationProvider {
 			// Authorize BEFORE the existence check so an unauthorized caller
 			// can't distinguish 404 (absent) from 403 (exists) — no row-existence
 			// oracle for a user without `<resource>.show`.
-			if (
-				!(await authorizeAction(
-					resource,
-					"show",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "show"))) return;
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
@@ -1769,18 +1772,7 @@ export default class StationProvider {
 		return async (ctx) => {
 			const { formColumns, pkColumn, writeOnly } =
 				this.#requireContext(resource);
-			if (
-				!(await authorizeAction(
-					resource,
-					"create",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "create"))) return;
 			// 57.7 — after a failed create redirected back (PRG), the flash carries
 			// the old input + per-field errors; re-populate + surface them.
 			const { values, errors } = readFlash(ctx, formColumns);
@@ -1808,23 +1800,12 @@ export default class StationProvider {
 			// DB work — no 404-vs-403 oracle to a forged request. A seeded token is
 			// not proof; only `csrfProtected === true` is (AC4/AC7).
 			if (ctx.request.csrfProtected !== true) {
-				denyCsrf(ctx);
+				await this.#denyCsrf(ctx);
 				return;
 			}
 			const { repo, pkColumn, columns, booleanKeys, writeOnly, redacted } =
 				this.#requireContext(resource);
-			if (
-				!(await authorizeAction(
-					resource,
-					"create",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "create"))) return;
 			const body = await readBody(ctx);
 			// 57.7 — validate + mass-assignment guard in one pass. `result.data`
 			// holds ONLY editable-column keys (the allow-list: `editable`, or every
@@ -1850,6 +1831,7 @@ export default class StationProvider {
 				resource: resource.name,
 				recordId: created[pkColumn],
 				userId: ctx.auth?.user?.id,
+				...requestOrigin(ctx),
 				after: snapshotEntity(created, columns, redacted),
 				at: new Date(),
 			});
@@ -1864,18 +1846,7 @@ export default class StationProvider {
 			const { repo, formColumns, pkColumn, writeOnly } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
-			if (
-				!(await authorizeAction(
-					resource,
-					"edit",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "edit"))) return;
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
@@ -1911,24 +1882,13 @@ export default class StationProvider {
 		return async (ctx) => {
 			// Fail-close on CSRF before any auth/DB work (see #buildCreateHandler).
 			if (ctx.request.csrfProtected !== true) {
-				denyCsrf(ctx);
+				await this.#denyCsrf(ctx);
 				return;
 			}
 			const { repo, pkColumn, columns, booleanKeys, writeOnly, redacted } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
-			if (
-				!(await authorizeAction(
-					resource,
-					"edit",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "edit"))) return;
 			const id = ctx.params.id ?? "";
 			const entity = await repo.find(id);
 			if (entity === null) {
@@ -1981,6 +1941,7 @@ export default class StationProvider {
 				resource: resource.name,
 				recordId: entity[pkColumn],
 				userId: ctx.auth?.user?.id,
+				...requestOrigin(ctx),
 				before: beforeSnapshot,
 				after: afterSnapshot,
 				redactedChanges: changedRedacted(rawSecrets, entity, redacted),
@@ -2015,7 +1976,7 @@ export default class StationProvider {
 			// unsupported-override 405 branch would otherwise do work on a forged
 			// request and leak a 403-vs-405 oracle — guard the entrypoint too.
 			if (ctx.request.csrfProtected !== true) {
-				denyCsrf(ctx);
+				await this.#denyCsrf(ctx);
 				return;
 			}
 			const body = await readBody(ctx);
@@ -2045,24 +2006,13 @@ export default class StationProvider {
 		return async (ctx) => {
 			// Fail-close on CSRF before any auth/DB work (see #buildCreateHandler).
 			if (ctx.request.csrfProtected !== true) {
-				denyCsrf(ctx);
+				await this.#denyCsrf(ctx);
 				return;
 			}
 			const { repo, pkColumn, columns, redacted } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
-			if (
-				!(await authorizeAction(
-					resource,
-					"destroy",
-					ctx,
-					this.#authManager,
-					this.#authConfig.permissionPrefix,
-				))
-			) {
-				deny(ctx);
-				return;
-			}
+			if (!(await this.#authorize(ctx, resource, "destroy"))) return;
 			const id = ctx.params.id ?? "";
 			const row = await repo.find(id);
 			if (row === null) {
@@ -2079,6 +2029,7 @@ export default class StationProvider {
 				resource: resource.name,
 				recordId: row[pkColumn],
 				userId: ctx.auth?.user?.id,
+				...requestOrigin(ctx),
 				before,
 				at: new Date(),
 			});
@@ -2228,6 +2179,11 @@ export default class StationProvider {
 					roleOk = false;
 				}
 				if (!roleOk) {
+					await this.#securityEvent(ctx, {
+						action: "denied",
+						userId: user.id,
+						permission: `role:${required}`,
+					});
 					if (this.#wantsJsonResponse(ctx)) {
 						ctx.response.status(403);
 						ctx.response.json({ error: "insufficient role" });
@@ -2255,6 +2211,11 @@ export default class StationProvider {
 					accessOk = false;
 				}
 				if (!accessOk) {
+					await this.#securityEvent(ctx, {
+						action: "denied",
+						userId: user.id,
+						permission: access,
+					});
 					deny(ctx);
 					return;
 				}
@@ -2312,7 +2273,7 @@ export default class StationProvider {
 			// AuthManager work (see #buildCreateHandler). Login is open by design
 			// (no auth gate), so CSRF is the sole pre-check here.
 			if (ctx.request.csrfProtected !== true) {
-				denyCsrf(ctx);
+				await this.#denyCsrf(ctx);
 				return;
 			}
 			const manager = this.#authManager;
@@ -2349,6 +2310,10 @@ export default class StationProvider {
 			const token =
 				typeof result.user?.token === "string" ? result.user.token : undefined;
 			if (!result.authenticated || token === undefined) {
+				await this.#securityEvent(ctx, {
+					action: "login_failed",
+					identifier: email,
+				});
 				const vm = buildLoginViewModel({
 					action: this.#authConfig.loginPath,
 					email,
@@ -2362,6 +2327,11 @@ export default class StationProvider {
 				return;
 			}
 			await this.#loginLimiter?.clear(...keys);
+			await this.#securityEvent(ctx, {
+				action: "login",
+				userId: result.user?.id,
+				identifier: email,
+			});
 			// No maxAge: a session cookie, gone with the browser; the token's own
 			// expiry is enforced by verify() on every request.
 			ctx.response.cookie?.(this.#authConfig.cookieName, token, {
@@ -2372,6 +2342,65 @@ export default class StationProvider {
 			});
 			ctx.response.redirect("/admin");
 		};
+	}
+
+	/**
+	 * The per-action gate: allow, or record the refusal and answer 403.
+	 */
+	async #authorize(
+		ctx: StationHttpContext,
+		resource: Resource,
+		action: ResourceAction,
+	): Promise<boolean> {
+		const prefix = this.#authConfig.permissionPrefix;
+		if (
+			await authorizeAction(resource, action, ctx, this.#authManager, prefix)
+		) {
+			return true;
+		}
+		await this.#securityEvent(ctx, {
+			action: "denied",
+			userId: ctx.auth?.user?.id,
+			resource: resource.name,
+			resourceAction: action,
+			permission: `${prefix}.${resource.name}.${action}`,
+		});
+		deny(ctx);
+		return false;
+	}
+
+	/** Record a CSRF block, then refuse it. */
+	async #denyCsrf(ctx: StationHttpContext): Promise<void> {
+		await this.#securityEvent(ctx, { action: "csrf_denied" });
+		denyCsrf(ctx);
+	}
+
+	/**
+	 * Send a security event to `station.audit`, stamped with the request
+	 * origin. A failing sink is logged, never allowed to change the response.
+	 */
+	async #securityEvent(
+		ctx: StationHttpContext,
+		event: Omit<
+			SecurityAuditEvent,
+			"at" | "ip" | "userAgent" | "requestId" | "path"
+		>,
+	): Promise<void> {
+		const sink = this.#securityAudit;
+		if (sink === undefined) return;
+		try {
+			await sink({
+				...event,
+				...requestOrigin(ctx),
+				path: ctx.request.url?.(),
+				at: new Date(),
+			});
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			console.error(
+				`[station] security audit sink threw on ${event.action}: ${detail}. The event was NOT recorded.`,
+			);
+		}
 	}
 
 	/**
@@ -2428,6 +2457,10 @@ export default class StationProvider {
 			return false;
 		}
 		if (decision.allowed) return true;
+		await this.#securityEvent(ctx, {
+			action: "login_throttled",
+			identifier: email,
+		});
 		ctx.response.status(429);
 		ctx.response.header(
 			"Retry-After",
@@ -2455,20 +2488,44 @@ export default class StationProvider {
 			// Fail-close on CSRF: a forged cross-site POST must not be able to log
 			// an admin out (session-fixation nuisance) (see #buildCreateHandler).
 			if (ctx.request.csrfProtected !== true) {
-				denyCsrf(ctx);
+				await this.#denyCsrf(ctx);
 				return;
 			}
 			// Clearing the cookie alone left the token valid until it expired:
 			// a copy taken before logout (shared machine, proxy log) still
 			// opened the admin.
 			const token = this.#readAuthToken(ctx);
-			if (token !== undefined) await this.#revoke(token);
+			if (token !== undefined) {
+				// Who is leaving, read before the token is revoked — only when
+				// someone is listening, since it costs a verify().
+				const userId =
+					this.#securityAudit === undefined
+						? undefined
+						: (await this.#authManager?.verify(token))?.user?.id;
+				await this.#revoke(token);
+				await this.#securityEvent(ctx, { action: "logout", userId });
+			} else {
+				await this.#securityEvent(ctx, { action: "logout" });
+			}
 			ctx.response.clearCookie?.(this.#authConfig.cookieName, {
 				path: AUTH_COOKIE_PATH,
 			});
 			ctx.response.redirect(this.#authConfig.loginPath);
 		};
 	}
+}
+
+/** Who sent the request, as far as the host can tell. */
+function requestOrigin(ctx: StationHttpContext): {
+	ip?: string;
+	userAgent?: string;
+	requestId?: string;
+} {
+	return {
+		ip: ctx.request.ip?.(),
+		userAgent: ctx.request.header?.("user-agent"),
+		requestId: ctx.request.id?.() ?? ctx.request.header?.("x-request-id"),
+	};
 }
 
 /**
@@ -2701,7 +2758,7 @@ function isRouterProxyUninit(err: unknown): boolean {
 /**
  * 56.5 authorization gate. Returns true when the action is allowed.
  * Station authorizes EXCLUSIVELY through Warden's unified layer: the
- * decision is `auth.hasPermission(user, "<resource>.<action>", scope)`
+ * decision is `auth.hasPermission(user, "<prefix>.<resource>.<action>", scope)`
  * resolved via the container `"auth"` AuthManager (D1/D2). No
  * Station-local RBAC computation, no token-payload read.
  *

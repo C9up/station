@@ -27,4 +27,7 @@ export {
 	type Resource,
 	type ResourceAction,
 	type ResourceOptions,
+	type SecurityAuditAction,
+	type SecurityAuditEvent,
+	type SecurityAuditSink,
 } from "./types.js";

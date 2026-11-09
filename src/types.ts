@@ -27,10 +27,50 @@ export interface AuditEvent {
 	 * sets `auditSecrets`), so this is how a password change stays visible.
 	 */
 	readonly redactedChanges?: ReadonlyArray<string>;
+	/** Client IP of the request that made the change. */
+	readonly ip?: string;
+	readonly userAgent?: string;
+	/** `X-Request-Id` of that request, when the proxy or client set one. */
+	readonly requestId?: string;
 	readonly at: Date;
 }
 
 export type AuditSink = (event: AuditEvent) => void | Promise<void>;
+
+/** What a {@link SecurityAuditEvent} records. */
+export type SecurityAuditAction =
+	| "login"
+	| "login_failed"
+	| "login_throttled"
+	| "logout"
+	| "denied"
+	| "csrf_denied";
+
+/**
+ * A sign-in, sign-out or refusal on the admin surface, sent to the
+ * `station.audit` sink so brute force and probing show up in the trail.
+ */
+export interface SecurityAuditEvent {
+	readonly action: SecurityAuditAction;
+	/** The authenticated user, when one is known. */
+	readonly userId?: unknown;
+	/** The email a sign-in attempt submitted. */
+	readonly identifier?: string;
+	/** For `denied` on a resource action: its slug, action and permission. */
+	readonly resource?: string;
+	readonly resourceAction?: ResourceAction;
+	/** For `denied`: the permission or role that was missing. */
+	readonly permission?: string;
+	readonly path?: string;
+	readonly ip?: string;
+	readonly userAgent?: string;
+	readonly requestId?: string;
+	readonly at: Date;
+}
+
+export type SecurityAuditSink = (
+	event: SecurityAuditEvent,
+) => void | Promise<void>;
 
 /**
  * Per-field override for the auto-generated form (Story 54.5). Station
