@@ -93,6 +93,8 @@ export interface CtxOptions {
 	user?: { id: unknown; [key: string]: unknown };
 	ip?: string;
 	host?: string;
+	/** What `request.secure()` answers (HTTPS). */
+	secure?: boolean;
 	url?: string;
 }
 
@@ -116,6 +118,7 @@ export function buildCtx(opts: CtxOptions = {}): {
 		url: () => opts.url ?? "/admin",
 		host: () => headers.host ?? null,
 		id: () => headers["x-request-id"],
+		secure: () => opts.secure === true,
 	};
 	if (opts.ip !== undefined) {
 		const ip = opts.ip;

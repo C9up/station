@@ -87,6 +87,8 @@ interface StationHttpContext {
 		cookie?(name: string): string | undefined;
 		/** Client IP as the host resolved it (trusted-proxy aware in ream). */
 		ip?(): string;
+		/** Whether the request came over HTTPS (trusted-proxy aware in ream). */
+		secure?(): boolean;
 		/**
 		 * `true` only when the host's `@c9up/blackhole` middleware enforced +
 		 * validated CSRF for this request (a first-class ream `HttpContext`
@@ -447,6 +449,12 @@ interface WardenAuthManager {
 		role: string,
 		scope?: StationScope,
 	): Promise<boolean>;
+	/**
+	 * The guard `verify(token)` uses when no name is given (warden's
+	 * `getStrategy()`). Logout calls its `revoke(token)` when it has one —
+	 * JwtStrategy does, backed by its jti blacklist.
+	 */
+	getStrategy?(name?: string): unknown;
 }
 
 /**
@@ -491,6 +499,12 @@ export interface StationConfig {
 	 */
 	cookieName?: string;
 	/**
+	 * `Secure` flag of the auth cookie. Defaults to on everywhere except a
+	 * development/test process served over plain HTTP, so an unknown
+	 * environment behaves like production.
+	 */
+	cookieSecure?: boolean;
+	/**
 	 * Brute-force throttle on `POST /admin/login`: 5 attempts per IP and per
 	 * identifier every 15 minutes by default, in this process's memory. Pass
 	 * `limiter` (warden's `AuthRateLimiter` fits) to share counts across
@@ -504,6 +518,11 @@ export interface StationConfig {
 
 const MAX_PER_PAGE = 100;
 const DEFAULT_PERMISSION_PREFIX = "station";
+/**
+ * The auth cookie travels only to the admin: scoped to `/`, the admin bearer
+ * token rode along with every request to the rest of the application.
+ */
+const AUTH_COOKIE_PATH = "/admin";
 const DEFAULT_PER_PAGE = 25;
 const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
@@ -513,6 +532,7 @@ let perPageClampWarned = false;
 let seedPermsWarned = false;
 let missingAuditWarned = false;
 let csrfBlockedWarned = false;
+let revokeUnavailableWarned = false;
 
 /** @internal Reset module-level flags between tests. */
 export function resetStationProviderFlags(): void {
@@ -521,6 +541,7 @@ export function resetStationProviderFlags(): void {
 	seedPermsWarned = false;
 	missingAuditWarned = false;
 	csrfBlockedWarned = false;
+	revokeUnavailableWarned = false;
 }
 
 /**
@@ -940,6 +961,7 @@ export default class StationProvider {
 	// StationConfig.requireAuth is true (default when warden is present).
 	#authManager: WardenAuthManager | undefined;
 	#loginLimiter: StationLoginLimiter | undefined;
+	#cookieSecure: boolean | undefined;
 	#authConfig: Required<Pick<StationConfig, "loginPath" | "cookieName">> & {
 		requireAuth: boolean;
 		requireRole: string | undefined;
@@ -1001,6 +1023,7 @@ export default class StationProvider {
 		const { atlas, rune } = peers;
 		const router = withRouteMiddleware(peers.router, userConfig.middleware);
 		this.#loginLimiter = buildLoginLimiter(userConfig.loginRateLimit);
+		this.#cookieSecure = userConfig.cookieSecure;
 
 		// Phase 1a2 — resolve the SHARED inker renderer (AdonisJS/Edge parity)
 		// and mount Station's package templates as the `station` disk. Unlike
@@ -2147,7 +2170,7 @@ export default class StationProvider {
 				// Clear the stale cookie regardless of response shape, so neither
 				// a browser refresh nor an XHR caller retries with the dead token.
 				ctx.response.clearCookie?.(this.#authConfig.cookieName, {
-					path: "/",
+					path: AUTH_COOKIE_PATH,
 				});
 				if (this.#wantsJsonResponse(ctx)) {
 					ctx.response.status(401);
@@ -2318,14 +2341,44 @@ export default class StationProvider {
 				return;
 			}
 			await this.#loginLimiter?.clear(...keys);
+			// No maxAge: a session cookie, gone with the browser; the token's own
+			// expiry is enforced by verify() on every request.
 			ctx.response.cookie?.(this.#authConfig.cookieName, token, {
 				httpOnly: true,
 				sameSite: "Lax",
-				secure: process.env.NODE_ENV === "production",
-				path: "/",
+				secure: this.#cookieSecure ?? secureByDefault(ctx),
+				path: AUTH_COOKIE_PATH,
 			});
 			ctx.response.redirect("/admin");
 		};
+	}
+
+	/**
+	 * Revoke `token` through the default guard when it supports revocation.
+	 * A guard without it (or a JwtStrategy without a blacklist, whose
+	 * `revoke` throws) is reported once: logout then only clears the cookie.
+	 */
+	async #revoke(token: string): Promise<void> {
+		const strategy = this.#authManager?.getStrategy?.();
+		let reason = "the auth guard has no revoke(token)";
+		if (
+			typeof strategy === "object" &&
+			strategy !== null &&
+			"revoke" in strategy &&
+			typeof strategy.revoke === "function"
+		) {
+			try {
+				await strategy.revoke(token);
+				return;
+			} catch (err) {
+				reason = err instanceof Error ? err.message : String(err);
+			}
+		}
+		if (revokeUnavailableWarned) return;
+		revokeUnavailableWarned = true;
+		console.warn(
+			`[station] Logout cannot revoke the admin token (${reason}); it stays valid until it expires. Give warden's JwtStrategy a \`blacklist\` so a logged-out token is refused.`,
+		);
 	}
 
 	/**
@@ -2384,12 +2437,28 @@ export default class StationProvider {
 				denyCsrf(ctx);
 				return;
 			}
+			// Clearing the cookie alone left the token valid until it expired:
+			// a copy taken before logout (shared machine, proxy log) still
+			// opened the admin.
+			const token = this.#readAuthToken(ctx);
+			if (token !== undefined) await this.#revoke(token);
 			ctx.response.clearCookie?.(this.#authConfig.cookieName, {
-				path: "/",
+				path: AUTH_COOKIE_PATH,
 			});
 			ctx.response.redirect(this.#authConfig.loginPath);
 		};
 	}
+}
+
+/**
+ * `Secure` unless this is a development/test process on plain HTTP — an
+ * unknown environment gets the production answer, and `NODE_ENV=prod` is
+ * production too.
+ */
+function secureByDefault(ctx: StationHttpContext): boolean {
+	const env = normalizeNodeEnv(process.env.NODE_ENV);
+	if (env !== "development" && env !== "test") return true;
+	return ctx.request.secure?.() === true;
 }
 
 function buildLoginLimiter(
