@@ -33,6 +33,12 @@ import {
 	viewColumns,
 	writeOnlyKeys,
 } from "./columns.js";
+import {
+	loginKeys,
+	MemoryLoginLimiter,
+	type StationLoginLimiter,
+	type StationLoginRateLimitConfig,
+} from "./loginLimiter.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
 import type { AuditEvent, Resource, ResourceAction } from "./types.js";
@@ -79,6 +85,8 @@ interface StationHttpContext {
 		url?(): string;
 		header?(name: string): string | undefined;
 		cookie?(name: string): string | undefined;
+		/** Client IP as the host resolved it (trusted-proxy aware in ream). */
+		ip?(): string;
 		/**
 		 * `true` only when the host's `@c9up/blackhole` middleware enforced +
 		 * validated CSRF for this request (a first-class ream `HttpContext`
@@ -480,6 +488,16 @@ export interface StationConfig {
 	 * to avoid colliding with app-level session cookies.
 	 */
 	cookieName?: string;
+	/**
+	 * Brute-force throttle on `POST /admin/login`: 5 attempts per IP and per
+	 * identifier every 15 minutes by default, in this process's memory. Pass
+	 * `limiter` (warden's `AuthRateLimiter` fits) to share counts across
+	 * instances. `false` turns it off — only for an app that throttles the
+	 * route itself (see {@link middleware}).
+	 */
+	loginRateLimit?: StationLoginRateLimitConfig | false;
+	/** Named router middleware attached to every route Station mounts. */
+	middleware?: ReadonlyArray<string>;
 }
 
 const MAX_PER_PAGE = 100;
@@ -899,6 +917,7 @@ export default class StationProvider {
 	// 54.7 auth state — populated when warden is wired AND
 	// StationConfig.requireAuth is true (default when warden is present).
 	#authManager: WardenAuthManager | undefined;
+	#loginLimiter: StationLoginLimiter | undefined;
 	#authConfig: Required<Pick<StationConfig, "loginPath" | "cookieName">> & {
 		requireAuth: boolean;
 		requireRole: string | undefined;
@@ -957,7 +976,9 @@ export default class StationProvider {
 		// peer is a degraded-host signal: #loadPeers returns null → silent stop.
 		const peers = await this.#loadPeers();
 		if (!peers) return;
-		const { router, atlas, rune } = peers;
+		const { atlas, rune } = peers;
+		const router = withRouteMiddleware(peers.router, userConfig.middleware);
+		this.#loginLimiter = buildLoginLimiter(userConfig.loginRateLimit);
 
 		// Phase 1a2 — resolve the SHARED inker renderer (AdonisJS/Edge parity)
 		// and mount Station's package templates as the `station` disk. Unlike
@@ -2247,6 +2268,10 @@ export default class StationProvider {
 				ctx.response.send(html);
 				return;
 			}
+			// Counted BEFORE the credential check (warden's AuthRateLimiter
+			// contract): a refused attempt never reaches authenticate.
+			const keys = loginKeys(ctx.request.ip?.() ?? "unknown", email);
+			if (!(await this.#admitLogin(ctx, keys, email))) return;
 			const result = await manager.authenticate({ email, password });
 			// Warden returns the issued token on `user.token`, not at the
 			// top level — reading `result.token` (which never exists) sent
@@ -2266,6 +2291,7 @@ export default class StationProvider {
 				ctx.response.send(html);
 				return;
 			}
+			await this.#loginLimiter?.clear(...keys);
 			ctx.response.cookie?.(this.#authConfig.cookieName, token, {
 				httpOnly: true,
 				sameSite: "Lax",
@@ -2274,6 +2300,49 @@ export default class StationProvider {
 			});
 			ctx.response.redirect("/admin");
 		};
+	}
+
+	/**
+	 * Count a login attempt and answer the refusal when the limiter says no:
+	 * 429 + Retry-After when exhausted, 503 when the limiter itself failed (a
+	 * throttle that cannot count must not wave attempts through).
+	 */
+	async #admitLogin(
+		ctx: StationHttpContext,
+		keys: string[],
+		email: string,
+	): Promise<boolean> {
+		const limiter = this.#loginLimiter;
+		if (limiter === undefined) return true;
+		let decision: { allowed: boolean; retryAfterSeconds: number };
+		try {
+			decision = await limiter.attempt(...keys);
+		} catch (err) {
+			const detail = err instanceof Error ? err.message : String(err);
+			console.error(
+				`[station] login rate limiter failed — refusing the attempt (fail-closed): ${detail}`,
+			);
+			ctx.response.status(503);
+			ctx.response.type("text/plain; charset=utf-8");
+			ctx.response.send("Sign-in is temporarily unavailable.");
+			return false;
+		}
+		if (decision.allowed) return true;
+		ctx.response.status(429);
+		ctx.response.header(
+			"Retry-After",
+			String(Math.max(1, Math.ceil(decision.retryAfterSeconds))),
+		);
+		const vm = buildLoginViewModel({
+			action: this.#authConfig.loginPath,
+			email,
+			error: "Too many sign-in attempts. Try again later.",
+			csrfEnabled: ctx.store?.get("csrfToken") != null,
+		});
+		const html = await this.#renderView(ctx, "station::login", vm);
+		ctx.response.type("text/html; charset=utf-8");
+		ctx.response.send(html);
+		return false;
 	}
 
 	/**
@@ -2295,6 +2364,46 @@ export default class StationProvider {
 			ctx.response.redirect(this.#authConfig.loginPath);
 		};
 	}
+}
+
+function buildLoginLimiter(
+	config: StationConfig["loginRateLimit"],
+): StationLoginLimiter | undefined {
+	if (config === false) return undefined;
+	if (config?.limiter !== undefined) return config.limiter;
+	return new MemoryLoginLimiter(config?.maxAttempts, config?.windowSeconds);
+}
+
+/**
+ * A router whose every route gets `names` attached through the route's own
+ * `middleware(...names)` (ream's / AdonisJS's route API). A router that hands
+ * back no such method cannot honour the config, which is refused loudly.
+ */
+function withRouteMiddleware(
+	router: StationRouter,
+	names: ReadonlyArray<string> | undefined,
+): StationRouter {
+	if (names === undefined || names.length === 0) return router;
+	const attach = (route: unknown): unknown => {
+		if (
+			typeof route !== "object" ||
+			route === null ||
+			!("middleware" in route) ||
+			typeof route.middleware !== "function"
+		) {
+			throw new Error(
+				"[station] `station.middleware` is set but the router's routes have no middleware() method to attach it with.",
+			);
+		}
+		route.middleware(...names);
+		return route;
+	};
+	return {
+		get: (path, handler) => attach(router.get(path, handler)),
+		post: (path, handler) => attach(router.post(path, handler)),
+		put: (path, handler) => attach(router.put(path, handler)),
+		delete: (path, handler) => attach(router.delete(path, handler)),
+	};
 }
 
 /**
