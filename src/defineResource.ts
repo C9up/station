@@ -146,6 +146,7 @@ export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 		label,
 		actions: orderedActions,
 		audit,
+		auditSecrets: options.auditSecrets === true,
 		onAuditError,
 		formFields: Object.freeze(formFields),
 		list,

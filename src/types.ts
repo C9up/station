@@ -21,6 +21,12 @@ export interface AuditEvent {
 	readonly userId?: unknown;
 	readonly before?: Readonly<Record<string, unknown>>;
 	readonly after?: Readonly<Record<string, unknown>>;
+	/**
+	 * On an edit, the secret columns whose value changed. Their values are
+	 * replaced with `"[redacted]"` in `before`/`after` (unless the resource
+	 * sets `auditSecrets`), so this is how a password change stays visible.
+	 */
+	readonly redactedChanges?: ReadonlyArray<string>;
 	readonly at: Date;
 }
 
@@ -83,6 +89,13 @@ export interface ResourceOptions<TEntity> {
 	 */
 	audit?: AuditSink;
 	/**
+	 * Hand secret column values (`serializeAs: null` or a credential-like
+	 * name) to the audit sink as they are. Off by default: they are replaced
+	 * with `"[redacted]"`, because audit logs usually land in a less protected
+	 * store than the table they describe.
+	 */
+	auditSecrets?: boolean;
+	/**
 	 * Invoked when the audit sink throws (Story 54.6 hardening, retro
 	 * 2026-06-01). The mutation has already committed, so this is a
 	 * compliance-observability hook — emit an alert / enqueue a retry /
@@ -125,6 +138,8 @@ export interface Resource<TEntity = unknown> {
 	readonly actions: ReadonlyArray<ResourceAction>;
 	/** Optional audit sink (Story 54.6). */
 	readonly audit?: AuditSink;
+	/** Whether audit snapshots keep secret column values. */
+	readonly auditSecrets: boolean;
 	/** Optional audit-failure observability hook (Story 54.6 hardening). */
 	readonly onAuditError?: (event: AuditEvent, error: unknown) => void;
 	/** Frozen per-field overrides for the inferred form (Story 54.5). */

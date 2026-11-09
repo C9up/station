@@ -225,6 +225,8 @@ interface ResourceContext {
 	formColumns: ReadonlyArray<ColumnMetadata>;
 	/** Editable columns never pre-filled; an empty submission keeps them. */
 	writeOnly: ReadonlySet<string>;
+	/** Columns whose values audit snapshots replace with "[redacted]". */
+	redacted: ReadonlySet<string>;
 	pkColumn: string;
 	/**
 	 * Property keys of framework-managed timestamp columns — those declared
@@ -862,9 +864,14 @@ function isCheckedValue(value: unknown): boolean {
 function snapshotEntity(
 	entity: Record<string, unknown>,
 	columns: ReadonlyArray<ColumnMetadata>,
+	redacted: ReadonlySet<string>,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
-	for (const c of columns) out[c.propertyKey] = entity[c.propertyKey];
+	for (const c of columns) {
+		out[c.propertyKey] = redacted.has(c.propertyKey)
+			? REDACTED
+			: entity[c.propertyKey];
+	}
 	try {
 		return structuredClone(out);
 	} catch (err) {
@@ -891,6 +898,21 @@ function snapshotEntity(
 	}
 }
 let auditCloneWarnEmitted = false;
+
+/** What an audit snapshot holds in place of a secret column's value. */
+const REDACTED = "[redacted]";
+
+/**
+ * The redacted columns an edit changed — read from the raw values, so the
+ * audit trail says "password changed" without carrying either hash.
+ */
+function changedRedacted(
+	before: Readonly<Record<string, unknown>>,
+	entity: Readonly<Record<string, unknown>>,
+	redacted: ReadonlySet<string>,
+): string[] {
+	return [...redacted].filter((key) => !Object.is(before[key], entity[key]));
+}
 
 /**
  * Filesystem path to the `.inker` templates Station ships inside the
@@ -1745,7 +1767,7 @@ export default class StationProvider {
 				denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns, booleanKeys, writeOnly } =
+			const { repo, pkColumn, columns, booleanKeys, writeOnly, redacted } =
 				this.#requireContext(resource);
 			if (
 				!(await authorizeAction(
@@ -1784,7 +1806,7 @@ export default class StationProvider {
 				resource: resource.name,
 				recordId: created[pkColumn],
 				userId: ctx.auth?.user?.id,
-				after: snapshotEntity(created, columns),
+				after: snapshotEntity(created, columns, redacted),
 				at: new Date(),
 			});
 			redirectToShow(ctx, resource, created[pkColumn]);
@@ -1848,7 +1870,7 @@ export default class StationProvider {
 				denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns, booleanKeys, writeOnly } =
+			const { repo, pkColumn, columns, booleanKeys, writeOnly, redacted } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (
@@ -1902,12 +1924,14 @@ export default class StationProvider {
 			// would shadow the original values after setProp). `result.data`
 			// holds only declared, type-checked columns — the mass-assignment
 			// guarantee (PK / timestamps / unknown keys dropped) is inherent.
-			const beforeSnapshot = snapshotEntity(entity, columns);
+			const beforeSnapshot = snapshotEntity(entity, columns, redacted);
+			const rawSecrets: Record<string, unknown> = {};
+			for (const key of redacted) rawSecrets[key] = entity[key];
 			for (const [key, value] of Object.entries(result.data)) {
 				entity.setProp(key, value);
 			}
 			await repo.save(entity);
-			const afterSnapshot = snapshotEntity(entity, columns);
+			const afterSnapshot = snapshotEntity(entity, columns, redacted);
 			await emitAudit(resource, {
 				action: "edit",
 				resource: resource.name,
@@ -1915,6 +1939,7 @@ export default class StationProvider {
 				userId: ctx.auth?.user?.id,
 				before: beforeSnapshot,
 				after: afterSnapshot,
+				redactedChanges: changedRedacted(rawSecrets, entity, redacted),
 				at: new Date(),
 			});
 			redirectToShow(ctx, resource, entity[pkColumn]);
@@ -1979,7 +2004,8 @@ export default class StationProvider {
 				denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns } = this.#requireContext(resource);
+			const { repo, pkColumn, columns, redacted } =
+				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (
 				!(await authorizeAction(
@@ -2002,7 +2028,7 @@ export default class StationProvider {
 				ctx.response.send(notFoundHtml);
 				return;
 			}
-			const before = snapshotEntity(row, columns);
+			const before = snapshotEntity(row, columns, redacted);
 			await repo.delete(row);
 			await emitAudit(resource, {
 				action: "destroy",
@@ -2492,6 +2518,11 @@ function buildResourceContext(
 		showColumns,
 		formColumns,
 		writeOnly,
+		redacted: new Set(
+			resource.auditSecrets
+				? []
+				: columns.filter(isSecretColumn).map((c) => c.propertyKey),
+		),
 		pkColumn,
 		autoManaged,
 		writableSchema: derived?.schema,
