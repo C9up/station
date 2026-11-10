@@ -120,6 +120,7 @@ export function buildCtx(opts: CtxOptions = {}): {
 		host: () => headers.host ?? null,
 		id: () => headers["x-request-id"],
 		secure: () => opts.secure === true,
+		protocol: () => (opts.secure === true ? "https" : "http"),
 	};
 	if (opts.ip !== undefined) {
 		const ip = opts.ip;

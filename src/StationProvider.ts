@@ -94,8 +94,10 @@ interface StationHttpContext {
 		url?(): string;
 		/** `X-Request-Id`, when the proxy or client set one (AdonisJS `id`). */
 		id?(): string | undefined;
-		/** `:authority` or `Host` — never a forwarded host (AdonisJS `authority`). */
-		authority?(): string | null;
+		/** Host with port: `Host`, or `X-Forwarded-Host` from a trusted proxy. */
+		host?(): string | null;
+		/** `http` or `https` (trusted-proxy aware in ream). */
+		protocol?(): string;
 		/** Client IP as the host resolved it (trusted-proxy aware in ream). */
 		ip?(): string;
 		/** Whether the request came over HTTPS (trusted-proxy aware in ream). */
@@ -837,50 +839,73 @@ function readFlash(
 }
 
 /**
- * The path a `Referer` points back to, when it may be trusted — AdonisJS's
- * `isValidRedirectUrl` + `redirect().back()`: a relative path is trusted, an
- * absolute URL only when its host is the request's own authority (`Host` /
- * `:authority`, never a forwarded host), and the redirect goes to the path
- * alone. Comparing with `request.url()` could never work: in ream that is
- * the path, while a browser's Referer is a full URL. Deliberately stricter
- * than upstream in one place: with no authority to compare against, an
- * absolute Referer is refused rather than accepted.
+ * The path and query a `Referer` points back to, when it may be trusted —
+ * AdonisJS's `isValidRedirectUrl` + `redirect().back()`: a relative path is
+ * trusted, an absolute URL only when its origin (scheme + host) is the
+ * request's own, and the redirect goes to its path and query alone. Comparing
+ * with `request.url()` could never work: in ream that is the path, while a
+ * browser's Referer is a full URL. Deliberately stricter than upstream in one
+ * place: with no origin to compare against, an absolute Referer is refused
+ * rather than accepted.
  */
 function trustedRefererPath(
 	referer: string,
-	authority: string | null | undefined,
+	origin: string | undefined,
 ): string | undefined {
 	// A relative path is trusted only when it starts with a single "/" and
 	// contains no backslash: browsers normalise "\\" to "/", so "/\\evil.com"
 	// becomes the protocol-relative "//evil.com" that a lone `!startsWith("//")`
 	// check would let through.
 	if (referer.startsWith("//") || referer.includes("\\")) return undefined;
+	let url: URL;
 	try {
 		if (referer.startsWith("/")) {
-			const url = new URL(referer, "http://localhost");
-			return url.host === "localhost" ? url.pathname : undefined;
+			url = new URL(referer, "http://localhost");
+			if (url.origin !== "http://localhost") return undefined;
+		} else {
+			if (origin === undefined) return undefined;
+			url = new URL(referer);
+			if (url.origin !== origin) return undefined;
 		}
-		if (authority === null || authority === undefined || authority === "") {
-			return undefined;
-		}
-		const url = new URL(referer);
-		return url.host === authority ? url.pathname : undefined;
+	} catch {
+		return undefined;
+	}
+	// Dot segments are resolved by the parser: "/.//evil.com" comes out as the
+	// path "//evil.com", protocol-relative again once used as a Location.
+	if (url.pathname.startsWith("//")) return undefined;
+	return url.pathname + url.search;
+}
+
+/**
+ * The request's own origin, as the browser saw it: ream's trusted-proxy aware
+ * `protocol()` + `host()` (a proxy the app trusts forwards the public scheme
+ * and host, which is what the Referer carries). Undefined when either is
+ * unknown, so an absolute Referer can't be checked and is refused.
+ */
+function ownOrigin(ctx: StationHttpContext): string | undefined {
+	const { request } = ctx;
+	const secure = request.secure?.();
+	const protocol =
+		request.protocol?.() ??
+		(secure === undefined ? undefined : secure ? "https" : "http");
+	const host = request.host?.() ?? request.header?.("host");
+	if (protocol === undefined || !host) return undefined;
+	try {
+		return new URL(`${protocol}://${host}`).origin;
 	} catch {
 		return undefined;
 	}
 }
 
 /**
- * `redirect().back()` over Station's `redirect(url)` seam (57.7): the path of a
- * trusted `Referer`, else the caller's `fallback` (the form URL).
+ * `redirect().back()` over Station's `redirect(url)` seam (57.7): the path and
+ * query of a trusted `Referer`, else the caller's `fallback` (the form URL).
  */
 function redirectBack(ctx: StationHttpContext, fallback: string): void {
 	const referer = ctx.request.header?.("referer");
-	const authority =
-		ctx.request.authority?.() ?? ctx.request.header?.("host") ?? undefined;
 	const target =
 		typeof referer === "string"
-			? (trustedRefererPath(referer, authority) ?? fallback)
+			? (trustedRefererPath(referer, ownOrigin(ctx)) ?? fallback)
 			: fallback;
 	ctx.response.redirect(target);
 }
