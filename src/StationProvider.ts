@@ -2879,8 +2879,7 @@ function buildResourceContext(
  * is honoured by funnelling every load-bearing narrow (dynamic peer
  * imports, IoC-resolved `db`, atlas-agnostic `Resource.entity` handed to
  * Atlas's `BaseRepository`) through this single function. Analogous to
- * 54.1's AC9 exception (`{} as ResourceRegistry` in `services/main.ts`)
- * and the test-side `tests/__helpers__/bypass-type-check.ts`. Every
+ * the test-side `tests/__helpers__/bypass-type-check.ts`. Every
  * call site MUST carry a rationale comment explaining why static
  * narrowing isn't expressible at the boundary. NEVER widen this helper
  * beyond `unknown → T`.
