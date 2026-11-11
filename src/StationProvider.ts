@@ -532,6 +532,13 @@ export interface StationConfig {
 	/** Named router middleware attached to every route Station mounts. */
 	middleware?: ReadonlyArray<string>;
 	/**
+	 * The warden guard the admin signs in, verifies and logs out through.
+	 * Defaults to the auth manager's default guard. Station's sign-in issues
+	 * a bearer token kept in its cookie, so the guard must be a token guard
+	 * (warden's JWT strategy): a session guard is refused at boot.
+	 */
+	guard?: string;
+	/**
 	 * Sink for the admin's security events: sign-in success, failure and
 	 * throttling, logout, authorization denials and CSRF blocks, each with the
 	 * client IP and request id. Write events keep going to each resource's
@@ -1058,7 +1065,10 @@ export default class StationProvider {
 		requireRole: string | undefined;
 		permissionPrefix: string;
 		accessPermission: string | undefined;
+		/** The warden guard name; undefined uses the manager's default. */
+		guard: string | undefined;
 	} = {
+		guard: undefined,
 		requireAuth: false,
 		requireRole: undefined,
 		loginPath: "/admin/login",
@@ -1405,6 +1415,51 @@ export default class StationProvider {
 	 * Wire the warden auth gate from the `station` config block. When warden is
 	 * not installed/bound the gate stays open and a one-time warning is emitted.
 	 */
+	/**
+	 * Refuse at boot a guard that cannot carry station's sign-in: it must
+	 * exist, and issue the bearer token the admin cookie holds (warden's JWT
+	 * strategy, `signToken`). A session guard answers `authenticate()` with a
+	 * USE_LOGIN error and `verify()` with false, which made every sign-in a
+	 * 500 and every admin page a bounce to the login form. A manager without
+	 * `getStrategy` cannot be inspected and is taken as it is.
+	 */
+	#assertTokenGuard(guard: string | undefined): void {
+		const manager = this.#authManager;
+		if (manager?.getStrategy === undefined) return;
+		const named =
+			guard === undefined ? "the default guard" : `guard '${guard}'`;
+		let strategy: unknown;
+		try {
+			strategy = manager.getStrategy(guard);
+		} catch (cause) {
+			throw new Error(
+				`[station] \`station.guard\`: ${named} is not a registered warden guard.`,
+				{ cause },
+			);
+		}
+		const issuesTokens =
+			typeof strategy === "object" &&
+			strategy !== null &&
+			"authenticate" in strategy &&
+			typeof strategy.authenticate === "function" &&
+			"verify" in strategy &&
+			typeof strategy.verify === "function" &&
+			"signToken" in strategy &&
+			typeof strategy.signToken === "function";
+		if (issuesTokens) return;
+		const kind =
+			typeof strategy === "object" &&
+			strategy !== null &&
+			"name" in strategy &&
+			typeof strategy.name === "string"
+				? ` (${strategy.name})`
+				: "";
+		throw new Error(
+			`[station] The admin signs in through ${named}${kind}, which does not issue a bearer token. ` +
+				"Station keeps the token warden's JWT strategy issues in its cookie: name a JWT guard with `station.guard`.",
+		);
+	}
+
 	async #configureAuth(userConfig: StationConfig): Promise<void> {
 		const permissionPrefix =
 			userConfig.permissionPrefix ?? DEFAULT_PERMISSION_PREFIX;
@@ -1413,12 +1468,19 @@ export default class StationProvider {
 				"[station] `station.permissionPrefix` must be a non-empty string: admin permissions need their own namespace.",
 			);
 		}
+		const guard = userConfig.guard;
+		if (guard !== undefined && (typeof guard !== "string" || guard === "")) {
+			throw new Error(
+				"[station] `station.guard` must be a non-empty warden guard name.",
+			);
+		}
 		const wardenWanted = userConfig.requireAuth !== false;
 		if (wardenWanted) {
 			try {
 				this.#authManager =
 					await this.app.container.resolve<WardenAuthManager>("auth");
 				this.#authConfig = {
+					guard,
 					requireAuth: true,
 					requireRole: userConfig.requireRole,
 					loginPath: userConfig.loginPath ?? "/admin/login",
@@ -1444,7 +1506,10 @@ export default class StationProvider {
 				}
 			}
 		}
-		if (this.#authConfig.requireAuth) return;
+		if (this.#authConfig.requireAuth) {
+			this.#assertTokenGuard(guard);
+			return;
+		}
 
 		// An admin panel with no auth is full CRUD on every registered resource
 		// for anyone who can reach the route. That is a different product, and
@@ -2216,7 +2281,7 @@ export default class StationProvider {
 				ctx.response.redirect(this.#authConfig.loginPath);
 				return;
 			}
-			const result = await manager.verify(token);
+			const result = await manager.verify(token, this.#authConfig.guard);
 			if (!result.authenticated || result.user === undefined) {
 				// A strategy CRASH (the auth backend threw) is a server fault, not a
 				// failed/expired login — don't clear the cookie or bounce to /login
@@ -2336,7 +2401,7 @@ export default class StationProvider {
 			if (manager !== undefined) {
 				const token = this.#readAuthToken(ctx);
 				if (typeof token === "string" && token.length > 0) {
-					const result = await manager.verify(token);
+					const result = await manager.verify(token, this.#authConfig.guard);
 					if (result.authenticated) {
 						ctx.response.redirect("/admin");
 						return;
@@ -2393,7 +2458,10 @@ export default class StationProvider {
 			// contract): a refused attempt never reaches authenticate.
 			const keys = loginKeys(ctx.request.ip?.() ?? "unknown", email);
 			if (!(await this.#admitLogin(ctx, keys, email))) return;
-			const result = await manager.authenticate({ email, password });
+			const result = await manager.authenticate(
+				{ email, password },
+				this.#authConfig.guard,
+			);
 			// A strategy that threw is a server fault, not a failed sign-in:
 			// the operator gets the backend's message, the visitor a 503 that
 			// says nothing about it, and no `login_failed` is recorded.
@@ -2511,7 +2579,7 @@ export default class StationProvider {
 	 * `revoke` throws) is reported once: logout then only clears the cookie.
 	 */
 	async #revoke(token: string): Promise<void> {
-		const strategy = this.#authManager?.getStrategy?.();
+		const strategy = this.#authManager?.getStrategy?.(this.#authConfig.guard);
 		let reason = "the auth guard has no revoke(token)";
 		if (
 			typeof strategy === "object" &&
@@ -2626,7 +2694,8 @@ export default class StationProvider {
 				const userId =
 					this.#securityAudit === undefined
 						? undefined
-						: (await this.#authManager?.verify(token))?.user?.id;
+						: (await this.#authManager?.verify(token, this.#authConfig.guard))
+								?.user?.id;
 				await this.#revoke(token);
 				await this.#securityEvent(ctx, { action: "logout", userId });
 			} else {

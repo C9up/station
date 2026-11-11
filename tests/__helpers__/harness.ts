@@ -241,7 +241,12 @@ export function buildFakeAuth(opts: FakeAuthOptions = {}) {
 	const asked: string[] = [];
 	const calls = { authenticate: 0, revoke: [] as string[] };
 	let issued = 0;
+	// The JwtStrategy shape station's boot check accepts: it issues a token.
 	const strategy = {
+		name: "jwt",
+		authenticate: () => Promise.resolve({ authenticated: false }),
+		verify: () => Promise.resolve({ authenticated: false }),
+		signToken: () => "unused",
 		revoke(token: string): Promise<boolean> {
 			calls.revoke.push(token);
 			return Promise.resolve(validTokens.delete(token));
