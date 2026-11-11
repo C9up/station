@@ -1,3 +1,4 @@
+import { inspect } from "node:util";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { defineResource } from "../../src/defineResource.js";
@@ -18,6 +19,23 @@ describe("services/main singleton", () => {
 	it("throws on pre-bind access with the load-bearing substring", async () => {
 		const mod = await loadFresh();
 		expect(() => mod.default.count()).toThrow(
+			/accessed before StationProvider\.boot\(\)/,
+		);
+	});
+
+	it("is not a thenable and can be inspected before binding", async () => {
+		const mod = await loadFresh();
+		const station = mod.default;
+		// Promise resolution reads `then`: a throwing trap rejected this.
+		await expect(Promise.resolve(station)).resolves.toBe(station);
+		await expect(
+			import("../../src/services/main.js").then((m) => m.default),
+		).resolves.toBe(station);
+		expect(() => inspect(station)).not.toThrow();
+		expect(Reflect.get(station, Symbol.toPrimitive)).toBeUndefined();
+		expect(Reflect.get(station, Symbol.iterator)).toBeUndefined();
+		// A real member still reports the missing wiring.
+		expect(() => station.all()).toThrow(
 			/accessed before StationProvider\.boot\(\)/,
 		);
 	});

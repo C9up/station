@@ -35,8 +35,18 @@ export function clearStation(): void {
 	instance = undefined;
 }
 
-const station: ResourceRegistry = new Proxy({} as ResourceRegistry, {
+// The target is never read through: every trap forwards to `instance`.
+const target: ResourceRegistry = Object.create(null);
+
+const station: ResourceRegistry = new Proxy(target, {
 	get(_target, prop) {
+		// A module loader or a promise inspects a value before anyone uses it:
+		// it reads `then` to decide whether the value is thenable, and symbols
+		// for interop and formatting. They are not ResourceRegistry members, so
+		// answer undefined and leave the report to a genuine member access.
+		if (typeof prop === "symbol" || prop === "then") {
+			return undefined;
+		}
 		if (!instance) {
 			throw new Error(
 				"[station] ResourceRegistry singleton accessed before StationProvider.boot() ran " +
