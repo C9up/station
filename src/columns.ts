@@ -117,20 +117,33 @@ export function editableColumns(
 }
 
 /**
- * Editable columns whose stored value is never sent back to the browser: the
- * form renders them empty and an empty submission leaves them unchanged.
+ * A secret for this resource: a secret column, or one the resource renders as
+ * a password input whatever its name. The one predicate behind the write-only
+ * form fields, the redacted audit columns and the input never flashed into
+ * the session, so the three cannot disagree.
+ */
+export function isWriteOnlyColumn(
+	c: ColumnMetadata,
+	resource: Resource,
+): boolean {
+	return (
+		isSecretColumn(c) ||
+		resource.formFields[c.propertyKey]?.inputType === "password"
+	);
+}
+
+/**
+ * The columns among `columns` whose value is never sent back to the browser,
+ * flashed or audited: the form renders them empty, an empty submission leaves
+ * them unchanged, and audit snapshots redact them.
  */
 export function writeOnlyKeys(
-	editable: ReadonlyArray<ColumnMetadata>,
+	columns: ReadonlyArray<ColumnMetadata>,
 	resource: Resource,
 ): ReadonlySet<string> {
 	return new Set(
-		editable
-			.filter(
-				(c) =>
-					isSecretColumn(c) ||
-					resource.formFields[c.propertyKey]?.inputType === "password",
-			)
+		columns
+			.filter((c) => isWriteOnlyColumn(c, resource))
 			.map((c) => c.propertyKey),
 	);
 }

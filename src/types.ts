@@ -84,7 +84,11 @@ export interface FormFieldOverride {
 	 * body carrying it is ignored and a hidden boolean keeps its stored value.
 	 */
 	hidden?: boolean;
-	/** Override the rendered `<input type>`. */
+	/**
+	 * Override the rendered `<input type>`. `"password"` makes the column a
+	 * secret: never pre-filled, never flashed back after a failed write, and
+	 * redacted in audit snapshots like a credential-named column.
+	 */
 	inputType?:
 		| "text"
 		| "number"
@@ -129,8 +133,8 @@ export interface ResourceOptions<TEntity> {
 	 */
 	audit?: AuditSink;
 	/**
-	 * Hand secret column values (`serializeAs: null` or a credential-like
-	 * name) to the audit sink as they are. Off by default: they are replaced
+	 * Hand secret column values (`serializeAs: null`, a credential-like name,
+	 * or a `formFields` password input) to the audit sink as they are. Off by default: they are replaced
 	 * with `"[redacted]"`, because audit logs usually land in a less protected
 	 * store than the table they describe.
 	 */

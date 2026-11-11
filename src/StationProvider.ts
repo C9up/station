@@ -29,7 +29,6 @@ import type {
 import {
 	editableColumns,
 	isFrameworkManaged,
-	isSecretColumn,
 	viewColumns,
 	writeOnlyKeys,
 } from "./columns.js";
@@ -810,17 +809,19 @@ const VALIDATION_ERROR_CODE = "E_VALIDATION_ERROR";
 /**
  * The subset of a submitted body safe to re-surface on a validation error:
  * declared columns only — so `_csrf`, `_method`, and any mass-assignment /
- * arbitrary key are dropped from the flash store — minus sensitive fields (a
- * password is never written to the session nor reflected into the re-rendered
- * form). An empty result lets the caller fall back to the existing `row`.
+ * arbitrary key are dropped from the flash store — minus the write-only ones
+ * (a password is never written to the session nor reflected into the
+ * re-rendered form). An empty result lets the caller fall back to the
+ * existing `row`.
  */
 function flashableInput(
 	submitted: Record<string, unknown>,
 	columns: ReadonlyArray<ColumnMetadata>,
+	writeOnly: ReadonlySet<string>,
 ): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	for (const c of columns) {
-		if (isSecretColumn(c)) continue;
+		if (writeOnly.has(c.propertyKey)) continue;
 		if (c.propertyKey in submitted)
 			out[c.propertyKey] = submitted[c.propertyKey];
 	}
@@ -1701,7 +1702,7 @@ export default class StationProvider {
 		// `_csrf`, secrets, or mass-assignment keys (both the flash store and the
 		// re-rendered HTML). An empty result falls back to `row`.
 		const { formColumns, pkColumn, writeOnly } = this.#requireContext(resource);
-		const safe = flashableInput(submitted, formColumns);
+		const safe = flashableInput(submitted, formColumns, writeOnly);
 		const { fields, form } = formErrors(errors);
 		if (ctx.session !== undefined) {
 			// AdonisJS PRG: flash old input + errors, redirect back to the form.
@@ -2737,11 +2738,9 @@ function buildResourceContext(
 		showColumns,
 		formColumns,
 		writeOnly,
-		redacted: new Set(
-			resource.auditSecrets
-				? []
-				: columns.filter(isSecretColumn).map((c) => c.propertyKey),
-		),
+		redacted: resource.auditSecrets
+			? new Set<string>()
+			: writeOnlyKeys(columns, resource),
 		pkColumn,
 		autoManaged,
 		writableSchema: derived?.schema,
