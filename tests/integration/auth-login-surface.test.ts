@@ -418,7 +418,7 @@ describe("station > integration > 54.7 warden integration + login surface", () =
 		expect(res.status).toBe(401);
 		expect(res.contentType).toBe("text/html; charset=utf-8");
 		expect(res.body).toContain('name="password"');
-		expect(res.body).toContain("Invalid credentials");
+		expect(res.body).toContain("Invalid email or password.");
 		// Email is preserved so user doesn't retype.
 		expect(res.body).toContain('value="admin@example.com"');
 		expect(res.cookies.size).toBe(0);

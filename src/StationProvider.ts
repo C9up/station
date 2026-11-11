@@ -429,7 +429,10 @@ interface WardenAuthManager {
 		// the issued token on `user.token` (see warden AuthManager.ts +
 		// JwtStrategy.authenticate). The session cookie is read from there.
 		user?: { id: unknown; token?: string; [key: string]: unknown };
+		/** Operator detail: may carry a thrown backend message, never shown. */
 		error?: string;
+		/** The strategy threw (a backend fault), as `verify()` reports it. */
+		strategyCrash?: boolean;
 	}>;
 	verify(
 		token: string,
@@ -2372,6 +2375,20 @@ export default class StationProvider {
 			const keys = loginKeys(ctx.request.ip?.() ?? "unknown", email);
 			if (!(await this.#admitLogin(ctx, keys, email))) return;
 			const result = await manager.authenticate({ email, password });
+			// A strategy that threw is a server fault, not a failed sign-in:
+			// the operator gets the backend's message, the visitor a 503 that
+			// says nothing about it, and no `login_failed` is recorded.
+			if (result.strategyCrash === true) {
+				console.error(
+					`[station] admin sign-in failed in the auth backend: ${result.error ?? "unknown error"}`,
+				);
+				await this.#refuseLogin(ctx, email, {
+					status: 503,
+					code: "E_STATION_LOGIN_UNAVAILABLE",
+					message: "Sign-in is temporarily unavailable.",
+				});
+				return;
+			}
 			// Warden returns the issued token on `user.token`, not at the
 			// top level — reading `result.token` (which never exists) sent
 			// every valid login down the 401 branch.
@@ -2382,10 +2399,13 @@ export default class StationProvider {
 					action: "login_failed",
 					identifier: email,
 				});
+				// Never `result.error`: warden's authenticate() turns any thrown
+				// error into that string, so it can carry a database or lookup
+				// failure's own wording to an unauthenticated visitor.
 				await this.#refuseLogin(ctx, email, {
 					status: 401,
 					code: "E_STATION_INVALID_CREDENTIALS",
-					message: result.error ?? "Invalid email or password.",
+					message: "Invalid email or password.",
 				});
 				return;
 			}
