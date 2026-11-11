@@ -48,6 +48,8 @@ export interface FormPageInput {
 	values?: Readonly<Record<string, unknown>>;
 	/** Validation errors keyed by column propertyKey. */
 	errors?: Readonly<Record<string, string>>;
+	/** A validation error about the submission as a whole (no field shows it). */
+	formError?: string;
 	/**
 	 * Fields rendered empty whatever their stored or submitted value (secrets).
 	 * A `password` input is always treated this way: a credential, even a hash,
@@ -89,6 +91,7 @@ export type FormViewModel = {
 	cancelUrl: string;
 	submitLabel: string;
 	csrfEnabled: boolean;
+	formError: string;
 	fields: FormField[];
 };
 
@@ -100,6 +103,7 @@ export function buildFormViewModel(input: FormPageInput): FormViewModel {
 		row,
 		values,
 		errors,
+		formError,
 		csrfEnabled,
 		writeOnly,
 	} = input;
@@ -139,6 +143,7 @@ export function buildFormViewModel(input: FormPageInput): FormViewModel {
 		cancelUrl: action,
 		submitLabel: isEdit ? "Update" : "Create",
 		csrfEnabled: csrfEnabled === true,
+		formError: formError ?? "",
 		fields,
 	};
 }

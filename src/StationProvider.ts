@@ -726,9 +726,13 @@ function columnChain(
 export function validateWritableBody(
 	schema: RuneSchema,
 	booleanKeys: ReadonlySet<string>,
-	body: Record<string, unknown>,
+	body: unknown,
 	writeOnly: ReadonlySet<string> = new Set(),
 ): RuneValidationResult {
+	// A payload that is not an object (a JSON array, a scalar, null) goes to
+	// rune as it is, so the failure is reported on the root rather than as
+	// per-field errors against an empty object standing in for it.
+	if (!isPlainRecord(body)) return schema.validateResult(body);
 	const input: Record<string, unknown> = { ...body };
 	for (const key of writeOnly) {
 		if (input[key] === "") delete input[key];
@@ -759,28 +763,49 @@ function parseNumeric(value: unknown): unknown {
 }
 
 /**
- * Collapse rune's flat `ValidationError[]` to one message per top-level field
- * for the HTML form re-render (`form.inker` keys errors by column propertyKey).
- * The `_root` non-object error (a body that isn't a record — never happens for
- * a parsed form post) is skipped.
+ * Whether a rune error is about the payload as a whole. rune reports it on the
+ * empty field path (rule `object`, or `required` for a missing payload);
+ * releases before 0.2.4, still inside the peer range, named that path `_root`.
  */
-function fieldErrors(
-	errors: ReadonlyArray<RuneValidationError>,
-): Record<string, string> {
-	const out: Record<string, string> = {};
+function isRootError(e: RuneValidationError): boolean {
+	return e.field === "" || e.field === "_root";
+}
+
+/**
+ * Split rune's flat `ValidationError[]` for the HTML form re-render: one
+ * message per top-level field (`form.inker` keys errors by column
+ * propertyKey), and the payload-level failure, which no field can show, as a
+ * form-level message.
+ */
+function formErrors(errors: ReadonlyArray<RuneValidationError>): {
+	fields: Record<string, string>;
+	form: string | undefined;
+} {
+	const fields: Record<string, string> = {};
+	let form: string | undefined;
 	for (const e of errors) {
-		if (e.field === "_root") continue;
+		if (isRootError(e)) {
+			form ??= e.message;
+			continue;
+		}
 		// Collapse a nested dotted path (`profile.name`) to its top-level
 		// key — `form.ts` keys errors by column propertyKey. `split` always yields
 		// a non-empty array, so `[0]` is a string (no fallback needed).
 		const [key = e.field] = e.field.split(".");
-		if (!(key in out)) out[key] = e.message;
+		if (!(key in fields)) fields[key] = e.message;
 	}
-	return out;
+	return { fields, form };
 }
 
 /** Session flash key under which the per-field validation errors are stashed (AdonisJS `flashMessages.errors` parity). */
 const FLASH_ERRORS_KEY = "errors";
+
+/**
+ * Session flash key for the errors that belong to the form rather than to one
+ * field, keyed by error code (AdonisJS `errorsBag` parity).
+ */
+const FLASH_FORM_ERRORS_KEY = "errorsBag";
+const VALIDATION_ERROR_CODE = "E_VALIDATION_ERROR";
 
 /**
  * The subset of a submitted body safe to re-surface on a validation error:
@@ -822,21 +847,30 @@ function readFlash(
 ): {
 	values?: Record<string, unknown>;
 	errors?: Record<string, string>;
+	formError?: string;
 } {
 	const flashed = ctx.session?.flashMessages.all() ?? {};
 	if (Object.keys(flashed).length === 0) return {};
 	const values: Record<string, unknown> = {};
 	for (const c of columns) {
-		// `errors` is reserved for the per-field error bag — a column literally
-		// named `errors` must not receive that object as its field value.
-		if (c.propertyKey === FLASH_ERRORS_KEY) continue;
+		// `errors` / `errorsBag` are reserved for the error bags — a column
+		// literally named so must not receive that object as its field value.
+		if (
+			c.propertyKey === FLASH_ERRORS_KEY ||
+			c.propertyKey === FLASH_FORM_ERRORS_KEY
+		)
+			continue;
 		if (c.propertyKey in flashed)
 			values[c.propertyKey] = flashed[c.propertyKey];
 	}
 	const rawErrors = flashed[FLASH_ERRORS_KEY];
+	const formBag = flashed[FLASH_FORM_ERRORS_KEY];
 	return {
 		values: Object.keys(values).length > 0 ? values : undefined,
 		errors: isStringRecord(rawErrors) ? rawErrors : undefined,
+		formError: isStringRecord(formBag)
+			? formBag[VALIDATION_ERROR_CODE]
+			: undefined,
 	};
 }
 
@@ -1652,10 +1686,11 @@ export default class StationProvider {
 		if (wantsJsonResponse(ctx)) {
 			ctx.response.status(422);
 			// AdonisJS parity: `{ errors: [{ field, rule, message }] }` —
-			// the same shape ream's own `E_VALIDATION_ERROR` handler emits.
+			// the same shape ream's own `E_VALIDATION_ERROR` handler emits. The
+			// root failure reads `""` whichever rune release reported it.
 			ctx.response.json({
 				errors: errors.map((e) => ({
-					field: e.field,
+					field: isRootError(e) ? "" : e.field,
 					rule: e.rule,
 					message: e.message,
 				})),
@@ -1667,10 +1702,16 @@ export default class StationProvider {
 		// re-rendered HTML). An empty result falls back to `row`.
 		const { formColumns, pkColumn, writeOnly } = this.#requireContext(resource);
 		const safe = flashableInput(submitted, formColumns);
+		const { fields, form } = formErrors(errors);
 		if (ctx.session !== undefined) {
 			// AdonisJS PRG: flash old input + errors, redirect back to the form.
 			ctx.session.flashAll(safe);
-			ctx.session.flash(FLASH_ERRORS_KEY, fieldErrors(errors));
+			ctx.session.flash(FLASH_ERRORS_KEY, fields);
+			if (form !== undefined) {
+				ctx.session.flash(FLASH_FORM_ERRORS_KEY, {
+					[VALIDATION_ERROR_CODE]: form,
+				});
+			}
 			redirectBack(ctx, formUrl);
 			return;
 		}
@@ -1683,7 +1724,8 @@ export default class StationProvider {
 			writeOnly,
 			row,
 			values: Object.keys(safe).length > 0 ? safe : undefined,
-			errors: fieldErrors(errors),
+			errors: fields,
+			formError: form,
 			csrfEnabled: ctx.store?.get("csrfToken") != null,
 		});
 		ctx.response.status(422);
@@ -1801,7 +1843,7 @@ export default class StationProvider {
 			if (!(await this.#authorize(ctx, resource, "create"))) return;
 			// 57.7 — after a failed create redirected back (PRG), the flash carries
 			// the old input + per-field errors; re-populate + surface them.
-			const { values, errors } = readFlash(ctx, formColumns);
+			const { values, errors, formError } = readFlash(ctx, formColumns);
 			const vm = buildFormViewModel({
 				resource,
 				columns: formColumns,
@@ -1809,6 +1851,7 @@ export default class StationProvider {
 				writeOnly,
 				values,
 				errors,
+				formError,
 				csrfEnabled: ctx.store?.get("csrfToken") != null,
 			});
 			const html = await this.#renderView(ctx, "station::form", vm);
@@ -1832,7 +1875,8 @@ export default class StationProvider {
 			const { repo, pkColumn, columns, booleanKeys, writeOnly, redacted } =
 				this.#requireContext(resource);
 			if (!(await this.#authorize(ctx, resource, "create"))) return;
-			const body = await readBody(ctx);
+			const payload = await readPayload(ctx);
+			const body = isPlainRecord(payload) ? payload : {};
 			// 57.7 — validate + mass-assignment guard in one pass. `result.data`
 			// holds ONLY editable-column keys (the allow-list: `editable`, or every
 			// non-secret, non-hidden, non-framework column), so a forged `isAdmin`
@@ -1842,7 +1886,7 @@ export default class StationProvider {
 			const result = validateWritableBody(
 				this.#requireWritableSchema(resource, "create"),
 				booleanKeys,
-				body,
+				payload,
 				writeOnly,
 			);
 			if (!result.valid) {
@@ -1885,7 +1929,7 @@ export default class StationProvider {
 			// 57.7 — after a failed update redirected back (PRG), the flash carries
 			// the submitted values + errors; they win over the DB `row` so the user
 			// sees what they typed. A normal edit GET has no flash → fields from row.
-			const { values, errors } = readFlash(ctx, formColumns);
+			const { values, errors, formError } = readFlash(ctx, formColumns);
 			const vm = buildFormViewModel({
 				resource,
 				columns: formColumns,
@@ -1894,6 +1938,7 @@ export default class StationProvider {
 				row,
 				values,
 				errors,
+				formError,
 				csrfEnabled: ctx.store?.get("csrfToken") != null,
 			});
 			const html = await this.#renderView(ctx, "station::form", vm);
@@ -1924,7 +1969,8 @@ export default class StationProvider {
 				ctx.response.send(notFoundHtml);
 				return;
 			}
-			const body = await readBody(ctx);
+			const payload = await readPayload(ctx);
+			const body = isPlainRecord(payload) ? payload : {};
 			// 57.7 — validate BEFORE any snapshot or mutation (AC4). On failure the
 			// entity is untouched (no `setProp`, no `save`), so a bad edit never
 			// poisons the audit diff nor emits a success event; the form re-renders
@@ -1933,7 +1979,7 @@ export default class StationProvider {
 			const result = validateWritableBody(
 				this.#requireWritableSchema(resource, "update"),
 				booleanKeys,
-				body,
+				payload,
 				writeOnly,
 			);
 			if (!result.valid) {
@@ -2904,31 +2950,31 @@ function denyCsrf(ctx: StationHttpContext): void {
  * `ctx.request.body()` would return `{}` on the second read and the edit
  * would silently no-op.
  */
-const parsedBodyCache = new WeakMap<
-	StationHttpContext,
-	Record<string, unknown>
->();
+const parsedBodyCache = new WeakMap<StationHttpContext, unknown>();
 
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
+/**
+ * The request payload as the body parser produced it, whatever its shape. The
+ * write handlers validate it as is, so a payload that is not an object fails
+ * on the root instead of passing as an empty one.
+ */
+async function readPayload(ctx: StationHttpContext): Promise<unknown> {
+	if (parsedBodyCache.has(ctx)) return parsedBodyCache.get(ctx);
+	const raw =
+		typeof ctx.request.body === "function" ? await ctx.request.body() : {};
+	parsedBodyCache.set(ctx, raw);
+	return raw;
+}
+
+/** The payload's fields, or none when it is not an object. */
 async function readBody(
 	ctx: StationHttpContext,
 ): Promise<Record<string, unknown>> {
-	const cached = parsedBodyCache.get(ctx);
-	if (cached !== undefined) return cached;
-	const parsed = await parseBody(ctx);
-	parsedBodyCache.set(ctx, parsed);
-	return parsed;
-}
-
-async function parseBody(
-	ctx: StationHttpContext,
-): Promise<Record<string, unknown>> {
-	if (typeof ctx.request.body !== "function") return {};
-	const raw = await ctx.request.body();
-	return isPlainRecord(raw) ? raw : {};
+	const payload = await readPayload(ctx);
+	return isPlainRecord(payload) ? payload : {};
 }
 
 function redirectToShow(
