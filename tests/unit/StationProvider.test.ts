@@ -153,21 +153,32 @@ describe("station > StationProvider > lifecycle", () => {
 	it("start() tolerates non-Ream hosts (no 'router' registered → no throw)", async () => {
 		// No router registered in the container (`makeApp()` omits it) — the
 		// non-Ream / not-wired host shape. #loadPeers returns null and start()
-		// returns silently. Station ships publishable / agnostic.
-		const { app } = makeApp();
+		// stops silently before touching any other peer: no admin surface, no
+		// warning, no mounter on the registry. Station ships publishable /
+		// agnostic.
+		const { app, resolved } = makeApp();
 		const provider = new StationProvider(app);
 		provider.register();
 		await provider.boot();
 		const registry =
 			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 		registry.register(defineResource({ entity: User }));
+		const useMounter = vi.spyOn(registry, "useMounter");
+		resolved.length = 0;
 
 		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
 		try {
 			await expect(provider.start()).resolves.toBeUndefined();
+			await provider.ready();
+			expect(warnSpy).not.toHaveBeenCalled();
 		} finally {
 			warnSpy.mockRestore();
 		}
+		// Nothing past the registry was resolved: no router, db, view engine or
+		// auth manager, and no mounter was installed for later declarations.
+		expect(resolved.filter((t) => t !== ResourceRegistry)).toEqual([]);
+		expect(useMounter).not.toHaveBeenCalled();
+		expect(registry.count()).toBe(1);
 	});
 });
 
