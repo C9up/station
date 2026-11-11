@@ -553,6 +553,7 @@ let seedPermsWarned = false;
 let missingAuditWarned = false;
 let csrfBlockedWarned = false;
 let revokeUnavailableWarned = false;
+let auditCloneWarnEmitted = false;
 
 /** @internal Reset module-level flags between tests. */
 export function resetStationProviderFlags(): void {
@@ -562,6 +563,7 @@ export function resetStationProviderFlags(): void {
 	missingAuditWarned = false;
 	csrfBlockedWarned = false;
 	revokeUnavailableWarned = false;
+	auditCloneWarnEmitted = false;
 }
 
 /**
@@ -967,7 +969,6 @@ function snapshotEntity(
 		return out;
 	}
 }
-let auditCloneWarnEmitted = false;
 
 /** What an audit snapshot holds in place of a secret column's value. */
 const REDACTED = "[redacted]";

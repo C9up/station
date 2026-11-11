@@ -5,7 +5,7 @@
  * opts back in.
  */
 import "reflect-metadata";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import { resetStationProviderFlags } from "../../src/StationProvider.js";
 import type { AuditEvent } from "../../src/types.js";
 import { bootStation, buildCtx, buildTableDb } from "../__helpers__/harness.js";
@@ -82,6 +82,34 @@ describe("station > audit redaction (bug 216)", () => {
 		});
 		await find("put", "/admin/accounts/:id").handler(untouched.ctx);
 		expect(only(events).redactedChanges).toEqual([]);
+	});
+
+	it("resetStationProviderFlags() re-arms the audit shallow-copy warning", async () => {
+		// A value neither structuredClone (function) nor JSON (bigint) can copy
+		// forces the warned shallow-copy fallback.
+		const uncloneable = { format: () => "x", serial: 1n };
+		const destroyOnce = async () => {
+			const { find } = await bootStation({
+				db: buildTableDb([
+					{ id: 1, email: uncloneable, password: HASH, is_admin: false },
+				]).db,
+				resources: [{ entity: Account, audit: () => undefined }],
+			});
+			const { ctx } = buildCtx({ params: { id: "1" } });
+			await find("delete", "/admin/accounts/:id").handler(ctx);
+		};
+		const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			await destroyOnce();
+			const shallow = (call: unknown[]) =>
+				String(call[0]).includes("using a shallow copy");
+			expect(warn.mock.calls.filter(shallow)).toHaveLength(1);
+			resetStationProviderFlags();
+			await destroyOnce();
+			expect(warn.mock.calls.filter(shallow)).toHaveLength(2);
+		} finally {
+			warn.mockRestore();
+		}
 	});
 
 	it("auditSecrets: true keeps the raw values", async () => {
