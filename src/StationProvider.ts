@@ -242,6 +242,8 @@ interface ResourceContext {
 	/** Columns whose values audit snapshots replace with "[redacted]". */
 	redacted: ReadonlySet<string>;
 	pkColumn: string;
+	/** The primary key column's declared type, lower-cased ("" when untyped). */
+	pkType: string;
 	/**
 	 * Property keys of framework-managed timestamp columns — those declared
 	 * `@column.dateTime({ autoCreate })` / `{ autoUpdate }` (Lucid-style flag,
@@ -1821,13 +1823,14 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, showColumns, pkColumn } = this.#requireContext(resource);
+			const { repo, showColumns, pkColumn, pkType } =
+				this.#requireContext(resource);
 			// Authorize BEFORE the existence check so an unauthorized caller
 			// can't distinguish 404 (absent) from 403 (exists) — no row-existence
 			// oracle for a user without `<resource>.show`.
 			if (!(await this.#authorize(ctx, resource, "show"))) return;
 			const id = ctx.params.id ?? "";
-			const row = await repo.find(id);
+			const row = await findRecord(repo, pkType, id);
 			if (row === null) {
 				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
@@ -1926,12 +1929,12 @@ export default class StationProvider {
 		resource: Resource,
 	): (ctx: StationHttpContext) => Promise<void> {
 		return async (ctx) => {
-			const { repo, formColumns, pkColumn, writeOnly } =
+			const { repo, formColumns, pkColumn, pkType, writeOnly } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (!(await this.#authorize(ctx, resource, "edit"))) return;
 			const id = ctx.params.id ?? "";
-			const row = await repo.find(id);
+			const row = await findRecord(repo, pkType, id);
 			if (row === null) {
 				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
@@ -1969,12 +1972,19 @@ export default class StationProvider {
 				await this.#denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns, booleanKeys, writeOnly, redacted } =
-				this.#requireContext(resource);
+			const {
+				repo,
+				pkColumn,
+				pkType,
+				columns,
+				booleanKeys,
+				writeOnly,
+				redacted,
+			} = this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (!(await this.#authorize(ctx, resource, "edit"))) return;
 			const id = ctx.params.id ?? "";
-			const entity = await repo.find(id);
+			const entity = await findRecord(repo, pkType, id);
 			if (entity === null) {
 				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
@@ -2094,12 +2104,12 @@ export default class StationProvider {
 				await this.#denyCsrf(ctx);
 				return;
 			}
-			const { repo, pkColumn, columns, redacted } =
+			const { repo, pkColumn, pkType, columns, redacted } =
 				this.#requireContext(resource);
 			// Authorize before the existence check (no 404-vs-403 oracle).
 			if (!(await this.#authorize(ctx, resource, "destroy"))) return;
 			const id = ctx.params.id ?? "";
-			const row = await repo.find(id);
+			const row = await findRecord(repo, pkType, id);
 			if (row === null) {
 				const notFoundHtml = await this.#renderNotFound(ctx, resource, id);
 				ctx.response.status(404);
@@ -2784,6 +2794,9 @@ function buildResourceContext(
 			? new Set<string>()
 			: writeOnlyKeys(columns, resource),
 		pkColumn,
+		pkType: (
+			columns.find((c) => c.propertyKey === pkColumn)?.type ?? ""
+		).toLowerCase(),
 		autoManaged,
 		writableSchema: derived?.schema,
 		updateSchema: derived?.updateSchema,
@@ -3016,6 +3029,47 @@ async function readBody(
 ): Promise<Record<string, unknown>> {
 	const payload = await readPayload(ctx);
 	return isPlainRecord(payload) ? payload : {};
+}
+
+const INTEGER_PK_TYPES: ReadonlySet<string> = new Set([
+	"integer",
+	"int",
+	"smallint",
+	"bigint",
+	"serial",
+	"bigserial",
+	"increments",
+	"bigincrements",
+]);
+const INTEGER_ID_RE = /^-?[0-9]+$/;
+const UUID_ID_RE =
+	/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** atlas's refusal of a string parameter its column type cannot hold. */
+const UNBINDABLE_ID_RE = /^parameter \$1: '.*' is not a valid [a-z ]+$/s;
+
+/**
+ * The record a route's `:id` names, or null when there is none — including
+ * when the id cannot name a row at all. A declared integer or uuid primary
+ * key refuses a malformed id before any query; otherwise Postgres types the
+ * parameter from the column and atlas refuses a string that does not fit
+ * (`'abc'`, `'1e3'`, an i32 overflow), which is the same "no such record".
+ * Every other failure (a lost connection, a broken query) still propagates.
+ */
+async function findRecord(
+	repo: StationRepository,
+	pkType: string,
+	id: string,
+): Promise<StationEntity | null> {
+	if (INTEGER_PK_TYPES.has(pkType) && !INTEGER_ID_RE.test(id)) return null;
+	if (pkType === "uuid" && !UUID_ID_RE.test(id)) return null;
+	try {
+		return await repo.find(id);
+	} catch (err) {
+		if (err instanceof Error && UNBINDABLE_ID_RE.test(err.message)) {
+			return null;
+		}
+		throw err;
+	}
 }
 
 function redirectToShow(
