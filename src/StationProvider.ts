@@ -3083,6 +3083,11 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
  * The request payload as the body parser produced it, whatever its shape. The
  * write handlers validate it as is, so a payload that is not an object fails
  * on the root instead of passing as an empty one.
+ *
+ * Station never parses a body itself: in ream, `request.body()` is `{}` unless
+ * the host's `BodyParserMiddleware` claimed the request (a form post, or JSON
+ * under a JSON media type). The documented setup registers that middleware
+ * globally in `start/kernel.ts`, ahead of every route, admin ones included.
  */
 async function readPayload(ctx: StationHttpContext): Promise<unknown> {
 	if (parsedBodyCache.has(ctx)) return parsedBodyCache.get(ctx);
