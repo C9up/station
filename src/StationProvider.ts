@@ -2360,16 +2360,11 @@ export default class StationProvider {
 			const email = typeof body.email === "string" ? body.email.trim() : "";
 			const password = typeof body.password === "string" ? body.password : "";
 			if (email.length === 0 || password.length === 0) {
-				const vm = buildLoginViewModel({
-					action: this.#authConfig.loginPath,
-					email,
-					error: "Email and password are both required.",
-					csrfEnabled: ctx.store?.get("csrfToken") != null,
+				await this.#refuseLogin(ctx, email, {
+					status: 400,
+					code: "E_STATION_LOGIN_CREDENTIALS_REQUIRED",
+					message: "Email and password are both required.",
 				});
-				const html = await this.#renderView(ctx, "station::login", vm);
-				ctx.response.status(400);
-				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(html);
 				return;
 			}
 			// Counted BEFORE the credential check (warden's AuthRateLimiter
@@ -2387,16 +2382,11 @@ export default class StationProvider {
 					action: "login_failed",
 					identifier: email,
 				});
-				const vm = buildLoginViewModel({
-					action: this.#authConfig.loginPath,
-					email,
-					error: result.error ?? "Invalid email or password.",
-					csrfEnabled: ctx.store?.get("csrfToken") != null,
+				await this.#refuseLogin(ctx, email, {
+					status: 401,
+					code: "E_STATION_INVALID_CREDENTIALS",
+					message: result.error ?? "Invalid email or password.",
 				});
-				const html = await this.#renderView(ctx, "station::login", vm);
-				ctx.response.status(401);
-				ctx.response.type("text/html; charset=utf-8");
-				ctx.response.send(html);
 				return;
 			}
 			await this.#loginLimiter?.clear(...keys);
@@ -2524,9 +2514,11 @@ export default class StationProvider {
 			console.error(
 				`[station] login rate limiter failed — refusing the attempt (fail-closed): ${detail}`,
 			);
-			ctx.response.status(503);
-			ctx.response.type("text/plain; charset=utf-8");
-			ctx.response.send("Sign-in is temporarily unavailable.");
+			await this.#refuseLogin(ctx, email, {
+				status: 503,
+				code: "E_STATION_LOGIN_UNAVAILABLE",
+				message: "Sign-in is temporarily unavailable.",
+			});
 			return false;
 		}
 		if (decision.allowed) return true;
@@ -2534,21 +2526,42 @@ export default class StationProvider {
 			action: "login_throttled",
 			identifier: email,
 		});
-		ctx.response.status(429);
 		ctx.response.header(
 			"Retry-After",
 			String(Math.max(1, Math.ceil(decision.retryAfterSeconds))),
 		);
+		await this.#refuseLogin(ctx, email, {
+			status: 429,
+			code: "E_STATION_TOO_MANY_LOGIN_ATTEMPTS",
+			message: "Too many sign-in attempts. Try again later.",
+		});
+		return false;
+	}
+
+	/**
+	 * Answer a refused sign-in with the gate's content negotiation: a JSON or
+	 * XHR caller gets `{ error, code }`, a browser the sign-in page with the
+	 * message as its alert and the submitted email kept.
+	 */
+	async #refuseLogin(
+		ctx: StationHttpContext,
+		email: string,
+		refusal: { status: number; code: string; message: string },
+	): Promise<void> {
+		ctx.response.status(refusal.status);
+		if (wantsJsonResponse(ctx)) {
+			ctx.response.json({ error: refusal.message, code: refusal.code });
+			return;
+		}
 		const vm = buildLoginViewModel({
 			action: this.#authConfig.loginPath,
 			email,
-			error: "Too many sign-in attempts. Try again later.",
+			error: refusal.message,
 			csrfEnabled: ctx.store?.get("csrfToken") != null,
 		});
 		const html = await this.#renderView(ctx, "station::login", vm);
 		ctx.response.type("text/html; charset=utf-8");
 		ctx.response.send(html);
-		return false;
 	}
 
 	/**
