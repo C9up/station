@@ -1146,7 +1146,15 @@ export default class StationProvider {
 		// Phase 1b — wire the warden auth gate (or warn-once when it stays open).
 		await this.#configureAuth(userConfig);
 
-		const db = await this.#resolveDb();
+		// The `db` connection is only consumed per resource, so its absence is
+		// held the same way: rethrown when the first resource is declared.
+		let db: unknown;
+		let dbFailure: unknown;
+		try {
+			db = await this.#resolveDb();
+		} catch (err) {
+			dbFailure = err;
+		}
 
 		// Phase 2 — mount every resource, now and as they arrive. The shell (the
 		// login surface, the `/admin` index) goes up with the first one: an
@@ -1155,6 +1163,7 @@ export default class StationProvider {
 		registry.useMounter((resource) => {
 			if (!shellMounted) {
 				if (rendererFailure !== undefined) throw rendererFailure;
+				if (dbFailure !== undefined) throw dbFailure;
 				try {
 					this.#registerShellRoutes(router);
 				} catch (err) {

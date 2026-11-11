@@ -150,6 +150,26 @@ describe("station > StationProvider > lifecycle", () => {
 		}
 	});
 
+	it("start() without a 'db' binding boots while no resource exists, and the first resource names the missing connection", async () => {
+		const { app, bindings } = makeApp({ router: makeNoopRouter() });
+		bindings.delete("db");
+		const provider = new StationProvider(app);
+		provider.register();
+		await provider.boot();
+		const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+		try {
+			await expect(provider.start()).resolves.toBeUndefined();
+			await provider.ready();
+		} finally {
+			warnSpy.mockRestore();
+		}
+		const registry =
+			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
+		expect(() => registry.register(defineResource({ entity: User }))).toThrow(
+			/No 'db' connection registered/,
+		);
+	});
+
 	it("start() tolerates non-Ream hosts (no 'router' registered → no throw)", async () => {
 		// No router registered in the container (`makeApp()` omits it) — the
 		// non-Ream / not-wired host shape. #loadPeers returns null and start()
