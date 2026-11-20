@@ -68,7 +68,10 @@ function byName(
 
 /**
  * The columns a list or show view renders: the declared allow-list in its
- * order, or every non-secret column.
+ * order, or every column that is not write-only ({@link isWriteOnlyColumn}).
+ * A column the form renders as a password input is left out like a secret
+ * one: the edit form refuses to pre-fill it, so the show page one click away
+ * must not print it either. Naming it in the allow-list is the opt-in.
  */
 export function viewColumns(
 	columns: ReadonlyArray<ColumnMetadata>,
@@ -77,7 +80,7 @@ export function viewColumns(
 	option: string,
 ): ReadonlyArray<ColumnMetadata> {
 	if (allow !== undefined) return byName(columns, allow, resource, option);
-	return columns.filter((c) => !isSecretColumn(c));
+	return columns.filter((c) => !isWriteOnlyColumn(c, resource));
 }
 
 /**

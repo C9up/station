@@ -20,7 +20,10 @@ class Agent extends BaseEntity {
 
 const STORED = "stored-passcode-7731";
 
-async function boot(events: AuditEvent[]) {
+async function boot(
+	events: AuditEvent[],
+	views: { show?: { columns: string[] } } = {},
+) {
 	const table = buildTableDb([{ id: 1, email: "a@x.io", passcode: STORED }]);
 	const station = await bootStation({
 		db: table.db,
@@ -29,6 +32,7 @@ async function boot(events: AuditEvent[]) {
 				entity: Agent,
 				formFields: { passcode: { inputType: "password" } },
 				audit: (e) => void events.push(e),
+				...views,
 			},
 		],
 	});
@@ -93,5 +97,27 @@ describe("station > a formFields password input is a secret (bug 014)", () => {
 		const destroy = buildCtx({ params: { id: "1" } });
 		await station.find("delete", "/admin/agents/:id").handler(destroy.ctx);
 		expect(events[0]?.before?.passcode).toBe("[redacted]");
+	});
+
+	it("the list and show pages leave the passcode out by default (bug 029)", async () => {
+		const { station } = await boot([]);
+		const list = buildCtx({});
+		await station.find("get", "/admin/agents").handler(list.ctx);
+		expect(list.res.body).toContain("a@x.io");
+		expect(list.res.body).not.toContain(STORED);
+
+		const show = buildCtx({ params: { id: "1" } });
+		await station.find("get", "/admin/agents/:id").handler(show.ctx);
+		expect(show.res.body).toContain("a@x.io");
+		expect(show.res.body).not.toContain(STORED);
+	});
+
+	it("naming the passcode in show.columns is the opt-in that shows it", async () => {
+		const { station } = await boot([], {
+			show: { columns: ["email", "passcode"] },
+		});
+		const show = buildCtx({ params: { id: "1" } });
+		await station.find("get", "/admin/agents/:id").handler(show.ctx);
+		expect(show.res.body).toContain(STORED);
 	});
 });
