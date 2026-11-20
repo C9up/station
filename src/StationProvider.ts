@@ -555,6 +555,8 @@ const DEFAULT_PERMISSION_PREFIX = "station";
  */
 const AUTH_COOKIE_PATH = "/admin";
 const DEFAULT_PER_PAGE = 25;
+/** Longest login identifier accepted: an email's bound (RFC 5321). */
+const MAX_LOGIN_IDENTIFIER_LENGTH = 254;
 const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
 /** Process-scoped flags so we warn once per process, not once per request. */
@@ -2451,6 +2453,17 @@ export default class StationProvider {
 					status: 400,
 					code: "E_STATION_LOGIN_CREDENTIALS_REQUIRED",
 					message: "Email and password are both required.",
+				});
+				return;
+			}
+			// An email is at most 254 characters (RFC 5321). A longer identifier
+			// is refused before it becomes a limiter key, and not echoed back
+			// into the form.
+			if (email.length > MAX_LOGIN_IDENTIFIER_LENGTH) {
+				await this.#refuseLogin(ctx, "", {
+					status: 400,
+					code: "E_STATION_LOGIN_IDENTIFIER_TOO_LONG",
+					message: "That email address is too long.",
 				});
 				return;
 			}

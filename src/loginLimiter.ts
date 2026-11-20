@@ -6,9 +6,12 @@
  * `station.loginRateLimit.limiter`. Station cannot construct warden's class —
  * it never imports `@c9up/warden` — so the default is this in-process copy of
  * the same semantics: one atomic count per key BEFORE the credential check,
- * keys `ip:<ip>` and `id:<identifier>`, a bounded store that refuses new keys
- * rather than forgiving live windows when it is full.
+ * keys `ip:<ip>` and `id:<digest of the identifier>` counted in that order and
+ * no further than the first refused one, a bounded store that refuses new
+ * keys rather than forgiving live windows when it is full.
  */
+
+import { createHash } from "node:crypto";
 
 export interface StationLoginDecision {
 	allowed: boolean;
@@ -34,9 +37,17 @@ export interface StationLoginRateLimitConfig {
 	limiter?: StationLoginLimiter;
 }
 
-/** Same keys as warden's `AuthRateLimiter.loginKeys`, so a shared limiter shares budgets. */
+/**
+ * Same keys as warden's `AuthRateLimiter.loginKeys`, so a shared limiter
+ * shares budgets: the IP first, then the SHA-256 of the normalized identifier
+ * (trimmed, lowercased). The identifier is whatever the client posted; kept
+ * verbatim, a 1 MB body pinned 1 MB in the store for the whole window.
+ */
 export function loginKeys(ip: string, identifier: string): string[] {
-	return [`ip:${ip.trim()}`, `id:${identifier.trim().toLowerCase()}`];
+	const digest = createHash("sha256")
+		.update(identifier.trim().toLowerCase())
+		.digest("base64url");
+	return [`ip:${ip.trim()}`, `id:${digest}`];
 }
 
 const MAX_KEYS = 100_000;
@@ -51,6 +62,12 @@ export class MemoryLoginLimiter implements StationLoginLimiter {
 		this.#windowMs = positiveInteger("windowSeconds", windowSeconds) * 1000;
 	}
 
+	/**
+	 * Count the attempt under its keys, in order. The first key over the limit
+	 * refuses it and the keys after it are not counted: counting them all let
+	 * an IP already throttled create one `id:` window per request, until the
+	 * full store refused every other client's new keys.
+	 */
 	async attempt(...keys: string[]): Promise<StationLoginDecision> {
 		const now = Date.now();
 		let highest = 0;
@@ -61,6 +78,7 @@ export class MemoryLoginLimiter implements StationLoginLimiter {
 				highest = counted.count;
 				retryMs = counted.resetAt - now;
 			}
+			if (counted.count > this.#maxAttempts) break;
 		}
 		return {
 			allowed: highest <= this.#maxAttempts,

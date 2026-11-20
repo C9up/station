@@ -5,6 +5,7 @@
  * limiter and route middleware are configurable.
  */
 import "reflect-metadata";
+import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StationConfig } from "../../src/StationProvider.js";
 import { resetStationProviderFlags } from "../../src/StationProvider.js";
@@ -97,11 +98,37 @@ describe("station > admin login rate limit (bug 213)", () => {
 		expect(
 			(await attempt("admin@example.com", "hunter2", "1.2.3.4")).status,
 		).toBe(302);
-		expect(seen[0]).toEqual(["ip:1.2.3.4", "id:admin@example.com"]);
-		expect(cleared).toEqual([["ip:1.2.3.4", "id:admin@example.com"]]);
+		const id = `id:${createHash("sha256").update("admin@example.com").digest("base64url")}`;
+		expect(seen[0]).toEqual(["ip:1.2.3.4", id]);
+		expect(cleared).toEqual([["ip:1.2.3.4", id]]);
 		const refused = await attempt("admin@example.com", "hunter2", "1.2.3.4");
 		expect(refused.status).toBe(429);
 		expect(refused.headers.get("retry-after")).toBe("42");
+	});
+
+	it("refuses an identifier longer than an email can be, before the limiter (bug 028)", async () => {
+		const seen: string[][] = [];
+		const { auth, attempt } = await boot({
+			loginRateLimit: {
+				limiter: {
+					async attempt(...keys: string[]) {
+						seen.push(keys);
+						return { allowed: true, retryAfterSeconds: 1 };
+					},
+					async clear() {},
+				},
+			},
+		});
+		const huge = `${"a".repeat(1_000_000)}@x.io`;
+		const refused = await attempt(huge, "x");
+		expect(refused.status).toBe(400);
+		expect(seen).toHaveLength(0);
+		expect(auth.calls.authenticate).toBe(0);
+		// The refusal does not echo the megabyte back into the form.
+		expect(String(refused.body).length).toBeLessThan(100_000);
+		// 254 characters (RFC 5321's bound) still reach the limiter.
+		await attempt(`${"a".repeat(247)}@x.io`.padEnd(254, "o"), "x");
+		expect(seen).toHaveLength(1);
 	});
 
 	it("a limiter that throws refuses the login (fail-closed)", async () => {
