@@ -1199,7 +1199,7 @@ export default class StationProvider {
 			// Checked per resource, so the refusal names the one at fault.
 			if (rune === null && resourcesNeedValidation([resource])) {
 				throw new Error(
-					`[station] @c9up/rune is required to validate the write forms of the '${resource.name}' admin (create/edit) but is not installed. Add @c9up/rune (a Station peer dependency) — Station will NOT fall back to unvalidated mass-assignment. See https://ream.dev/modules/station#mass-assignment.`,
+					`[station] @c9up/rune is required to validate the write forms of the '${resource.name}' admin (create/edit) but is not installed. Add @c9up/rune (a Station peer dependency) — Station will NOT fall back to unvalidated mass-assignment. See https://r-eam.com/en/guides/digging-deeper/admin/authorization#mass-assignment-validation.`,
 				);
 			}
 			this.#contexts.set(
@@ -1548,7 +1548,7 @@ export default class StationProvider {
 		const envName =
 			env === "unknown" ? "AN UNCONFIGURED ENVIRONMENT" : env.toUpperCase();
 		console.warn(
-			"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action admin permissions in the Warden rights store BEFORE production. See https://ream.dev/modules/station#auth." +
+			"[station] Admin routes mounted without auth. Wire @c9up/warden (and set `station.requireAuth: true` if you opted out) and seed the per-action admin permissions in the Warden rights store BEFORE production. See https://r-eam.com/en/guides/digging-deeper/admin/authorization#no-authentication." +
 				(optedIn
 					? `\n  Running this way in ${envName} because \`station.requireAuth: false\` was set.`
 					: ""),
@@ -1676,7 +1676,7 @@ export default class StationProvider {
 			`${prefix}.${example.name}.create`,
 		];
 		console.warn(
-			`[station] Admin actions are gated behind '${prefix}.<resource>.<action>' permissions resolved through @c9up/warden${access === undefined ? "" : `, and entering the admin behind '${access}'`}. Seed roles/grants in the Warden rights store (store.defineRole('admin', [${perms.map((p) => `'${p}'`).join(", ")}, ...]) then assignRole) or every admin request will 403. See https://ream.dev/modules/station#authorization.`,
+			`[station] Admin actions are gated behind '${prefix}.<resource>.<action>' permissions resolved through @c9up/warden${access === undefined ? "" : `, and entering the admin behind '${access}'`}. Seed roles/grants in the Warden rights store (store.defineRole('admin', [${perms.map((p) => `'${p}'`).join(", ")}, ...]) then assignRole) or every admin request will 403. See https://r-eam.com/en/guides/digging-deeper/admin/authorization#authorization.`,
 		);
 	}
 
