@@ -113,6 +113,9 @@ describe("station > admin permission namespace (bug 214)", () => {
 				config: { permissionPrefix: "" },
 				resources: [{ entity: User }],
 			}),
-		).rejects.toThrow(/permissionPrefix/);
+		).rejects.toMatchObject({
+			code: "E_STATION_INVALID_CONFIG",
+			message: expect.stringMatching(/permissionPrefix/),
+		});
 	});
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { defineResource } from "../../src/defineResource.js";
+import * as errors from "../../src/errors.js";
 import {
 	RESOURCE_ACTIONS,
 	type ResourceAction,
@@ -82,7 +83,12 @@ describe("defineResource", () => {
 	it("rejects an empty actions array", () => {
 		class User {}
 		expect(() => defineResource({ entity: User, actions: [] })).toThrow(
-			/actions.+must contain at least one action/,
+			expect.objectContaining({
+				code: "E_STATION_INVALID_RESOURCE",
+				message: expect.stringMatching(
+					/actions.+must contain at least one action/,
+				),
+			}),
 		);
 	});
 
@@ -94,11 +100,16 @@ describe("defineResource", () => {
 		);
 	});
 
-	it("rejects a non-class entity with TypeError", () => {
+	it("rejects a non-class entity with E_STATION_INVALID_RESOURCE", () => {
 		const badOptions = bypassTypeCheck<ResourceOptions<unknown>>({
 			entity: "User",
 		});
-		expect(() => defineResource(badOptions)).toThrow(TypeError);
+		expect(() => defineResource(badOptions)).toThrow(
+			errors.E_STATION_INVALID_RESOURCE,
+		);
+		expect(() => defineResource(badOptions)).toThrow(
+			expect.objectContaining({ code: "E_STATION_INVALID_RESOURCE" }),
+		);
 	});
 
 	it("returns a frozen object with a frozen actions array", () => {
@@ -184,7 +195,12 @@ describe("defineResource", () => {
 		expect(resource.show.columns).toBeUndefined();
 		expect(Object.isFrozen(resource.editable)).toBe(true);
 		expect(() => defineResource({ entity: Account, editable: [""] })).toThrow(
-			/'editable' must be an array of column names/,
+			expect.objectContaining({
+				code: "E_STATION_INVALID_RESOURCE",
+				message: expect.stringMatching(
+					/'editable' must be an array of column names/,
+				),
+			}),
 		);
 		expect(() =>
 			defineResource(

@@ -9,6 +9,7 @@
  * the app itself via `setStation(myRegistry)`.
  */
 
+import { E_STATION_NOT_BOOTED } from "../errors.js";
 import type { ResourceRegistry } from "../ResourceRegistry.js";
 
 let instance: ResourceRegistry | undefined;
@@ -48,10 +49,7 @@ const station: ResourceRegistry = new Proxy(target, {
 			return undefined;
 		}
 		if (!instance) {
-			throw new Error(
-				"[station] ResourceRegistry singleton accessed before StationProvider.boot() ran " +
-					"or `setStation(myRegistry)` was called. Wire one of them first.",
-			);
+			throw new E_STATION_NOT_BOOTED();
 		}
 		const value = Reflect.get(instance, prop, instance);
 		return typeof value === "function" ? value.bind(instance) : value;

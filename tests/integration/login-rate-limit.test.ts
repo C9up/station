@@ -155,7 +155,10 @@ describe("station > admin login rate limit (bug 213)", () => {
 	it("rejects a limit that would not limit", async () => {
 		await expect(
 			boot({ loginRateLimit: { maxAttempts: Number.POSITIVE_INFINITY } }),
-		).rejects.toThrow(/maxAttempts/);
+		).rejects.toMatchObject({
+			code: "E_STATION_INVALID_CONFIG",
+			message: expect.stringMatching(/maxAttempts/),
+		});
 	});
 
 	it("attaches the configured named middleware to every route Station mounts", async () => {

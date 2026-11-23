@@ -286,7 +286,10 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 			).register(defineResource({ entity: User }));
 			captureRoutes(app);
 
-			await expect(provider.start()).rejects.toThrow(/register @c9up\/inker/);
+			await expect(provider.start()).rejects.toMatchObject({
+				code: "E_STATION_INKER_REQUIRED",
+				message: expect.stringMatching(/register @c9up\/inker/),
+			});
 		});
 
 		it('resources registered + `"inker"` resolves to a non-conforming value ⇒ start() throws the not-usable error, and the runtime guard is what rejected it (57.1 review)', async () => {
@@ -313,6 +316,7 @@ describe("station > integration > 54.8 agnostic peer-missing boot", () => {
 				throw new Error("expected start() to reject with an Error");
 			}
 			expect(err.message).toMatch(/not usable/);
+			expect(err).toMatchObject({ code: "E_STATION_INKER_UNUSABLE" });
 			// The chained cause proves the `isInkerViewRenderer` guard is what
 			// rejected the half-wired binding (missing renderToString) — not an
 			// unrelated resolve failure, and not a raw TypeError surfacing later

@@ -36,7 +36,12 @@ describe("services/main singleton", () => {
 		expect(Reflect.get(station, Symbol.iterator)).toBeUndefined();
 		// A real member still reports the missing wiring.
 		expect(() => station.all()).toThrow(
-			/accessed before StationProvider\.boot\(\)/,
+			expect.objectContaining({
+				code: "E_STATION_NOT_BOOTED",
+				message: expect.stringMatching(
+					/accessed before StationProvider\.boot\(\)/,
+				),
+			}),
 		);
 	});
 

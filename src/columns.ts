@@ -10,6 +10,10 @@
  */
 
 import type { ColumnMetadata } from "@c9up/atlas";
+import {
+	E_STATION_COLUMN_NOT_EDITABLE,
+	E_STATION_UNKNOWN_COLUMN,
+} from "./errors.js";
 import type { Resource } from "./types.js";
 
 /** Column names that hold credentials — hidden, never flashed, never echoed. */
@@ -58,9 +62,12 @@ function byName(
 	return names.map((name) => {
 		const column = columns.find((c) => c.propertyKey === name);
 		if (column === undefined) {
-			throw new Error(
-				`[station] defineResource '${resource.name}': ${option} names '${name}', which is not a column of ${resource.entity.name}.`,
-			);
+			throw new E_STATION_UNKNOWN_COLUMN([
+				resource.name,
+				option,
+				name,
+				resource.entity.name,
+			]);
 		}
 		return column;
 	});
@@ -99,14 +106,18 @@ export function editableColumns(
 		const picked = byName(columns, resource.editable, resource, "editable");
 		for (const c of picked) {
 			if (isFrameworkManaged(c, pkColumn, autoManaged, excludedProps)) {
-				throw new Error(
-					`[station] defineResource '${resource.name}': editable names '${c.propertyKey}', which the framework manages (primary key, timestamp, relation or soft-delete column).`,
-				);
+				throw new E_STATION_COLUMN_NOT_EDITABLE([
+					resource.name,
+					c.propertyKey,
+					"the framework manages (primary key, timestamp, relation or soft-delete column)",
+				]);
 			}
 			if (resource.formFields[c.propertyKey]?.hidden === true) {
-				throw new Error(
-					`[station] defineResource '${resource.name}': editable names '${c.propertyKey}', which formFields hides.`,
-				);
+				throw new E_STATION_COLUMN_NOT_EDITABLE([
+					resource.name,
+					c.propertyKey,
+					"formFields hides",
+				]);
 			}
 		}
 		return picked;

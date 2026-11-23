@@ -108,7 +108,10 @@ describe("station > the admin's warden guard (bug 016)", () => {
 
 	it("a session default guard is refused at boot with the option to set", async () => {
 		const { manager } = twoGuardManager("web");
-		await expect(boot(manager)).rejects.toThrow(/station\.guard/);
+		await expect(boot(manager)).rejects.toMatchObject({
+			code: "E_STATION_GUARD_NOT_JWT",
+			message: expect.stringMatching(/station\.guard/),
+		});
 	});
 
 	it("a session guard named explicitly is refused at boot", async () => {
@@ -120,16 +123,18 @@ describe("station > the admin's warden guard (bug 016)", () => {
 
 	it("an unknown guard name is refused at boot", async () => {
 		const { manager } = twoGuardManager("api");
-		await expect(boot(manager, { guard: "admin" })).rejects.toThrow(
-			/guard 'admin'/,
-		);
+		await expect(boot(manager, { guard: "admin" })).rejects.toMatchObject({
+			code: "E_STATION_UNKNOWN_GUARD",
+			message: expect.stringMatching(/guard 'admin'/),
+		});
 	});
 
 	it("an empty guard name is refused at boot", async () => {
 		const { manager } = twoGuardManager("api");
-		await expect(boot(manager, { guard: "" })).rejects.toThrow(
-			/station\.guard/,
-		);
+		await expect(boot(manager, { guard: "" })).rejects.toMatchObject({
+			code: "E_STATION_INVALID_CONFIG",
+			message: expect.stringMatching(/station\.guard/),
+		});
 	});
 
 	it("without station.guard the manager's default token guard is used", async () => {

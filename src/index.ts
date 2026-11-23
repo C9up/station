@@ -2,6 +2,7 @@ import "./augmentations.js";
 
 export { kebabCase, pluralise, titleCase } from "./casing.js";
 export { defineResource } from "./defineResource.js";
+export * as errors from "./errors.js";
 export type {
 	StationLoginLimiter,
 	StationLoginRateLimitConfig,

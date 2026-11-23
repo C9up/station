@@ -1,4 +1,5 @@
 import { kebabCase, pluralise, titleCase } from "./casing.js";
+import { E_STATION_INVALID_RESOURCE } from "./errors.js";
 import {
 	type AuditEvent,
 	type AuditSink,
@@ -30,9 +31,9 @@ function columnList(
 		!Array.isArray(value) ||
 		!value.every((v) => typeof v === "string" && v.length > 0)
 	) {
-		throw new TypeError(
-			`[station] defineResource: '${option}' must be an array of column names`,
-		);
+		throw new E_STATION_INVALID_RESOURCE([
+			`'${option}' must be an array of column names`,
+		]);
 	}
 	return Object.freeze([...value]);
 }
@@ -45,44 +46,44 @@ function columnList(
  */
 export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 	if (typeof options.entity !== "function") {
-		throw new TypeError(
-			"[station] defineResource: 'entity' must be a class constructor",
-		);
+		throw new E_STATION_INVALID_RESOURCE([
+			"'entity' must be a class constructor",
+		]);
 	}
 
 	if (options.actions !== undefined) {
 		if (!Array.isArray(options.actions) || options.actions.length === 0) {
-			throw new Error(
-				"[station] defineResource: 'actions' must contain at least one action",
-			);
+			throw new E_STATION_INVALID_RESOURCE([
+				"'actions' must contain at least one action",
+			]);
 		}
 		for (const action of options.actions) {
 			if (!isResourceAction(action)) {
-				throw new Error(
-					`[station] defineResource: unknown action '${String(action)}' (allowed: list, show, create, edit, destroy)`,
-				);
+				throw new E_STATION_INVALID_RESOURCE([
+					`unknown action '${String(action)}' (allowed: list, show, create, edit, destroy)`,
+				]);
 			}
 		}
 	}
 
 	if (options.name !== undefined && !NAME_PATTERN.test(options.name)) {
-		throw new Error(
-			`[station] defineResource: 'name' must be lowercase kebab-case (got: '${options.name}')`,
-		);
+		throw new E_STATION_INVALID_RESOURCE([
+			`'name' must be lowercase kebab-case (got: '${options.name}')`,
+		]);
 	}
 
 	const entityName = options.entity.name;
 	if (entityName === "") {
-		throw new Error(
-			"[station] defineResource: 'entity' class has no name (anonymous class); pass 'name:' explicitly",
-		);
+		throw new E_STATION_INVALID_RESOURCE([
+			"'entity' class has no name (anonymous class); pass 'name:' explicitly",
+		]);
 	}
 	const slugBase = kebabCase(entityName);
 	const name = options.name ?? pluralise(slugBase);
 	if (options.name === undefined && !NAME_PATTERN.test(name)) {
-		throw new Error(
-			`[station] defineResource: entity name '${entityName}' produces invalid slug '${name}'; pass 'name:' explicitly to override`,
-		);
+		throw new E_STATION_INVALID_RESOURCE([
+			`entity name '${entityName}' produces invalid slug '${name}'; pass 'name:' explicitly to override`,
+		]);
 	}
 	const label = options.label ?? titleCase(pluralise(slugBase));
 
@@ -102,9 +103,9 @@ export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 	const formFields: Record<string, FormFieldOverride> = {};
 	for (const [field, override] of Object.entries(formFieldsRaw)) {
 		if (override === null || typeof override !== "object") {
-			throw new TypeError(
-				`[station] defineResource: 'formFields.${field}' must be an object`,
-			);
+			throw new E_STATION_INVALID_RESOURCE([
+				`'formFields.${field}' must be an object`,
+			]);
 		}
 		formFields[field] = override;
 	}
@@ -122,9 +123,9 @@ export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 	let audit: AuditSink | undefined;
 	if (options.audit !== undefined) {
 		if (typeof options.audit !== "function") {
-			throw new TypeError(
-				`[station] defineResource: 'audit' must be a function (got ${typeof options.audit})`,
-			);
+			throw new E_STATION_INVALID_RESOURCE([
+				`'audit' must be a function (got ${typeof options.audit})`,
+			]);
 		}
 		audit = options.audit;
 	}
@@ -133,9 +134,9 @@ export function defineResource<T>(options: ResourceOptions<T>): Resource<T> {
 	let onAuditError: ((event: AuditEvent, error: unknown) => void) | undefined;
 	if (options.onAuditError !== undefined) {
 		if (typeof options.onAuditError !== "function") {
-			throw new TypeError(
-				`[station] defineResource: 'onAuditError' must be a function (got ${typeof options.onAuditError})`,
-			);
+			throw new E_STATION_INVALID_RESOURCE([
+				`'onAuditError' must be a function (got ${typeof options.onAuditError})`,
+			]);
 		}
 		onAuditError = options.onAuditError;
 	}

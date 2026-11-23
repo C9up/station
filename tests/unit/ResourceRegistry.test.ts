@@ -31,7 +31,10 @@ describe("ResourceRegistry", () => {
 	it("getOrThrow includes the requested name in the miss message", () => {
 		const registry = new ResourceRegistry();
 		expect(() => registry.getOrThrow("ghosts")).toThrow(
-			/no resource named 'ghosts'/,
+			expect.objectContaining({
+				code: "E_STATION_UNKNOWN_RESOURCE",
+				message: expect.stringMatching(/no resource named 'ghosts'/),
+			}),
 		);
 	});
 
@@ -42,7 +45,12 @@ describe("ResourceRegistry", () => {
 		registry.register(defineResource({ entity: User }));
 		const conflicting = defineResource({ entity: Account, name: "users" });
 		expect(() => registry.register(conflicting)).toThrow(
-			/duplicate resource name 'users'.+already registered for User/,
+			expect.objectContaining({
+				code: "E_STATION_DUPLICATE_RESOURCE",
+				message: expect.stringMatching(
+					/duplicate resource name 'users'.+already registered for User/,
+				),
+			}),
 		);
 	});
 

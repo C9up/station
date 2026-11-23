@@ -1,3 +1,7 @@
+import {
+	E_STATION_DUPLICATE_RESOURCE,
+	E_STATION_UNKNOWN_RESOURCE,
+} from "./errors.js";
 import type { Resource } from "./types.js";
 
 /**
@@ -26,9 +30,10 @@ export class ResourceRegistry {
 	register<T>(resource: Resource<T>): void {
 		const existing = this.#map.get(resource.name);
 		if (existing !== undefined) {
-			throw new Error(
-				`[station] ResourceRegistry: duplicate resource name '${resource.name}' (already registered for ${existing.entity.name})`,
-			);
+			throw new E_STATION_DUPLICATE_RESOURCE([
+				resource.name,
+				existing.entity.name,
+			]);
 		}
 		this.#map.set(resource.name, resource);
 		this.#mounter?.(resource);
@@ -53,9 +58,7 @@ export class ResourceRegistry {
 	getOrThrow(name: string): Resource {
 		const found = this.#map.get(name);
 		if (found === undefined) {
-			throw new Error(
-				`[station] ResourceRegistry: no resource named '${name}'`,
-			);
+			throw new E_STATION_UNKNOWN_RESOURCE([name]);
 		}
 		return found;
 	}

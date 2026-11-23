@@ -7,6 +7,7 @@
  * writable nor default-filled.
  */
 import "reflect-metadata";
+import { BaseEntity, Column, Entity } from "@c9up/atlas";
 import { beforeEach, describe, expect, it } from "vitest";
 import { resetStationProviderFlags } from "../../src/StationProvider.js";
 import { bootStation, buildCtx, buildTableDb } from "../__helpers__/harness.js";
@@ -102,7 +103,10 @@ describe("station > secret columns are not rendered (bug 209)", () => {
 				db: table.db,
 				resources: [{ entity: Account, list: { columns: ["emial"] } }],
 			}),
-		).rejects.toThrow(/emial/);
+		).rejects.toMatchObject({
+			code: "E_STATION_UNKNOWN_COLUMN",
+			message: expect.stringMatching(/emial/),
+		});
 	});
 });
 
@@ -204,13 +208,36 @@ describe("station > editable allow-list (bug 210)", () => {
 				db: seed().db,
 				resources: [{ entity: Account, editable: ["id", "email"] }],
 			}),
-		).rejects.toThrow(/'id'/);
+		).rejects.toMatchObject({
+			code: "E_STATION_COLUMN_NOT_EDITABLE",
+			message: expect.stringMatching(/'id'/),
+		});
 		resetStationProviderFlags();
 		await expect(
 			bootStation({
 				db: seed().db,
 				resources: [{ entity: Account, editable: ["nope"] }],
 			}),
-		).rejects.toThrow(/'nope'/);
+		).rejects.toMatchObject({
+			code: "E_STATION_UNKNOWN_COLUMN",
+			message: expect.stringMatching(/'nope'/),
+		});
+	});
+});
+
+describe("station > an entity without a primary key", () => {
+	beforeEach(() => resetStationProviderFlags());
+
+	it("fails at mount instead of guessing `id`", async () => {
+		@Entity("ledgers")
+		class Ledger extends BaseEntity {
+			@Column() declare label: string;
+		}
+		await expect(
+			bootStation({ db: seed().db, resources: [{ entity: Ledger }] }),
+		).rejects.toMatchObject({
+			code: "E_STATION_PRIMARY_KEY_MISSING",
+			message: expect.stringMatching(/primary key for Ledger/),
+		});
 	});
 });

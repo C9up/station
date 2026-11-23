@@ -18,6 +18,19 @@
  * swallowed.
  */
 
+import {
+	E_STATION_AUTH_REQUIRED,
+	E_STATION_DATABASE_REQUIRED,
+	E_STATION_GUARD_NOT_JWT,
+	E_STATION_INKER_REQUIRED,
+	E_STATION_INKER_UNUSABLE,
+	E_STATION_INTERNAL,
+	E_STATION_INVALID_CONFIG,
+	E_STATION_PRIMARY_KEY_MISSING,
+	E_STATION_ROUTE_MIDDLEWARE_UNSUPPORTED,
+	E_STATION_RUNE_REQUIRED,
+	E_STATION_UNKNOWN_GUARD,
+} from "./errors.js";
 import "./augmentations.js";
 import { fileURLToPath } from "node:url";
 import type {
@@ -1131,7 +1144,9 @@ export default class StationProvider {
 			userConfig.audit !== undefined &&
 			typeof userConfig.audit !== "function"
 		) {
-			throw new TypeError("[station] `station.audit` must be a function");
+			throw new E_STATION_INVALID_CONFIG([
+				"`station.audit` must be a function",
+			]);
 		}
 		this.#securityAudit = userConfig.audit;
 
@@ -1198,9 +1213,9 @@ export default class StationProvider {
 			// fallback to the deleted key-filter. Read-only admins need no rune.
 			// Checked per resource, so the refusal names the one at fault.
 			if (rune === null && resourcesNeedValidation([resource])) {
-				throw new Error(
-					`[station] @c9up/rune is required to validate the write forms of the '${resource.name}' admin (create/edit) but is not installed. Add @c9up/rune (a Station peer dependency) — Station will NOT fall back to unvalidated mass-assignment. See https://reamjs.com/en/guides/digging-deeper/admin/authorization#mass-assignment-validation.`,
-				);
+				throw new E_STATION_RUNE_REQUIRED([
+					`@c9up/rune is required to validate the write forms of the '${resource.name}' admin (create/edit) but is not installed. Add @c9up/rune (a Station peer dependency) — Station will NOT fall back to unvalidated mass-assignment. See https://reamjs.com/en/guides/digging-deeper/admin/authorization#mass-assignment-validation.`,
+				]);
 			}
 			this.#contexts.set(
 				resource,
@@ -1298,9 +1313,7 @@ export default class StationProvider {
 	 */
 	async #resolveViewRenderer(): Promise<InkerViewRenderer> {
 		if (!this.app.container.has("inker")) {
-			throw new Error(
-				"[station] register @c9up/inker (InkerProvider) to render admin views",
-			);
+			throw new E_STATION_INKER_REQUIRED();
 		}
 		try {
 			const resolved = await this.app.container.resolve<unknown>("inker");
@@ -1311,10 +1324,7 @@ export default class StationProvider {
 			}
 			return resolved;
 		} catch (cause) {
-			throw new Error(
-				"[station] @c9up/inker is registered but not usable — it must fully boot (InkerProvider + its rosetta/router peers) before Station, and resolve to a real view renderer. See `cause` for the specific reason.",
-				{ cause },
-			);
+			throw new E_STATION_INKER_UNUSABLE(undefined, { cause });
 		}
 	}
 
@@ -1333,7 +1343,7 @@ export default class StationProvider {
 		id: string,
 	): Promise<string> {
 		if (this.#viewRenderer === undefined) {
-			throw new Error("[station] view engine not initialised");
+			throw new E_STATION_INTERNAL();
 		}
 		const renderCtx = {
 			request: ctx.request,
@@ -1399,7 +1409,7 @@ export default class StationProvider {
 		data: Readonly<Record<string, unknown>>,
 	): Promise<string> {
 		if (this.#viewRenderer === undefined) {
-			throw new Error("[station] view engine not initialised");
+			throw new E_STATION_INTERNAL();
 		}
 		// Thread the real per-request store (57.3/D3) so the als-backed inker
 		// helpers — `csrfField()` on the form/login views — read the token. Inert
@@ -1434,10 +1444,7 @@ export default class StationProvider {
 		try {
 			strategy = manager.getStrategy(guard);
 		} catch (cause) {
-			throw new Error(
-				`[station] \`station.guard\`: ${named} is not a registered warden guard.`,
-				{ cause },
-			);
+			throw new E_STATION_UNKNOWN_GUARD([named], { cause });
 		}
 		const issuesTokens =
 			typeof strategy === "object" &&
@@ -1456,25 +1463,22 @@ export default class StationProvider {
 			typeof strategy.name === "string"
 				? ` (${strategy.name})`
 				: "";
-		throw new Error(
-			`[station] The admin signs in through ${named}${kind}, which does not issue a bearer token. ` +
-				"Station keeps the token warden's JWT strategy issues in its cookie: name a JWT guard with `station.guard`.",
-		);
+		throw new E_STATION_GUARD_NOT_JWT([named, kind]);
 	}
 
 	async #configureAuth(userConfig: StationConfig): Promise<void> {
 		const permissionPrefix =
 			userConfig.permissionPrefix ?? DEFAULT_PERMISSION_PREFIX;
 		if (typeof permissionPrefix !== "string" || permissionPrefix === "") {
-			throw new Error(
-				"[station] `station.permissionPrefix` must be a non-empty string: admin permissions need their own namespace.",
-			);
+			throw new E_STATION_INVALID_CONFIG([
+				"`station.permissionPrefix` must be a non-empty string: admin permissions need their own namespace.",
+			]);
 		}
 		const guard = userConfig.guard;
 		if (guard !== undefined && (typeof guard !== "string" || guard === "")) {
-			throw new Error(
-				"[station] `station.guard` must be a non-empty warden guard name.",
-			);
+			throw new E_STATION_INVALID_CONFIG([
+				"`station.guard` must be a non-empty warden guard name.",
+			]);
 		}
 		const wardenWanted = userConfig.requireAuth !== false;
 		if (wardenWanted) {
@@ -1501,8 +1505,10 @@ export default class StationProvider {
 				// `requireAuth` was merely defaulted (undefined), fall through to
 				// the open-by-default mode and warn-once below.
 				if (userConfig.requireAuth === true) {
-					throw new Error(
-						"[station] `station.requireAuth: true` is set but no working `auth` binding is registered (wire @c9up/warden's WardenProvider). Refusing to mount an unauthenticated admin.",
+					throw new E_STATION_AUTH_REQUIRED(
+						[
+							"`station.requireAuth: true` is set but no working `auth` binding is registered (wire @c9up/warden's WardenProvider). Refusing to mount an unauthenticated admin.",
+						],
 						{ cause },
 					);
 				}
@@ -1530,13 +1536,13 @@ export default class StationProvider {
 			const where = inProduction()
 				? "production"
 				: `a non-development environment (NODE_ENV=${process.env.NODE_ENV === undefined ? "unset" : JSON.stringify(process.env.NODE_ENV)})`;
-			throw new Error(
-				`[station] Admin routes would mount with NO authorisation in ${where}: ` +
+			throw new E_STATION_AUTH_REQUIRED([
+				`Admin routes would mount with NO authorisation in ${where}: ` +
 					"no working `auth` binding is registered, so every `/admin/*` route — " +
 					"including create, update and delete — is open to anyone who can reach it.\n" +
 					"  Wire @c9up/warden's WardenProvider, or set `station.requireAuth: false` " +
 					"to state that an unauthenticated admin is intended here.",
-			);
+			]);
 		}
 
 		if (authWarnEmitted) return;
@@ -1712,9 +1718,9 @@ export default class StationProvider {
 	#requireContext(resource: Resource): ResourceContext {
 		const ctx = this.#contexts.get(resource);
 		if (!ctx) {
-			throw new Error(
-				`[station] No repository available for ${resource.entity.name}. Did you register @c9up/atlas/provider in reamrc.ts?`,
-			);
+			throw new E_STATION_DATABASE_REQUIRED([
+				`No repository available for ${resource.entity.name}.`,
+			]);
 		}
 		return ctx;
 	}
@@ -1733,9 +1739,9 @@ export default class StationProvider {
 		const writableSchema =
 			mode === "create" ? context.writableSchema : context.updateSchema;
 		if (writableSchema === undefined) {
-			throw new Error(
-				`[station] No validation schema for ${resource.entity.name} — @c9up/rune must be installed to accept admin writes.`,
-			);
+			throw new E_STATION_RUNE_REQUIRED([
+				`No validation schema for ${resource.entity.name} — @c9up/rune must be installed to accept admin writes.`,
+			]);
 		}
 		return writableSchema;
 	}
@@ -2203,8 +2209,8 @@ export default class StationProvider {
 		try {
 			return await this.app.container.resolve<unknown>("db");
 		} catch (cause) {
-			throw new Error(
-				`[station] No 'db' connection registered. Did you register @c9up/atlas/provider in reamrc.ts?`,
+			throw new E_STATION_DATABASE_REQUIRED(
+				[`No 'db' connection registered.`],
 				{ cause },
 			);
 		}
@@ -2771,9 +2777,7 @@ function withRouteMiddleware(
 			!("middleware" in route) ||
 			typeof route.middleware !== "function"
 		) {
-			throw new Error(
-				"[station] `station.middleware` is set but the router's routes have no middleware() method to attach it with.",
-			);
+			throw new E_STATION_ROUTE_MIDDLEWARE_UNSUPPORTED();
 		}
 		route.middleware(...names);
 		return route;
@@ -2816,9 +2820,7 @@ function buildResourceContext(
 		// REAL primary key out of the mass-assignment exclusion (client could
 		// overwrite it) and mis-key the audit `recordId` + the post-write
 		// redirect. Surface the metadata gap loud at boot instead.
-		throw new Error(
-			`[station] Could not resolve a primary key for ${resource.entity.name}. Declare an @PrimaryKey() column on the entity so atlas can report it.`,
-		);
+		throw new E_STATION_PRIMARY_KEY_MISSING([resource.entity.name]);
 	}
 	const dateColumns = atlas.getDateColumnConfig(resource.entity);
 	const autoManaged = new Set<string>(

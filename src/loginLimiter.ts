@@ -12,6 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { E_STATION_INVALID_CONFIG } from "./errors.js";
 
 export interface StationLoginDecision {
 	allowed: boolean;
@@ -120,9 +121,9 @@ export class MemoryLoginLimiter implements StationLoginLimiter {
 
 function positiveInteger(field: string, value: number): number {
 	if (!Number.isSafeInteger(value) || value <= 0) {
-		throw new Error(
-			`[station] station.loginRateLimit.${field} must be a positive whole number, got ${String(value)}`,
-		);
+		throw new E_STATION_INVALID_CONFIG([
+			`station.loginRateLimit.${field} must be a positive whole number, got ${String(value)}`,
+		]);
 	}
 	return value;
 }

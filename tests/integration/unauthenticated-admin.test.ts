@@ -83,7 +83,10 @@ describe("station > an admin with no auth binding", () => {
 	it("refuses to mount in production", async () => {
 		process.env.NODE_ENV = "production";
 
-		await expect(mount({})).rejects.toThrow(/NO authorisation in production/);
+		await expect(mount({})).rejects.toMatchObject({
+			code: "E_STATION_AUTH_REQUIRED",
+			message: expect.stringMatching(/NO authorisation in production/),
+		});
 	});
 
 	it("refuses under the spellings people actually set", async () => {

@@ -166,7 +166,10 @@ describe("station > StationProvider > lifecycle", () => {
 		const registry =
 			await app.container.resolve<ResourceRegistry>(ResourceRegistry);
 		expect(() => registry.register(defineResource({ entity: User }))).toThrow(
-			/No 'db' connection registered/,
+			expect.objectContaining({
+				code: "E_STATION_DATABASE_REQUIRED",
+				message: expect.stringMatching(/No 'db' connection registered/),
+			}),
 		);
 	});
 
