@@ -5,10 +5,8 @@
  */
 import "reflect-metadata";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import {
-	resetStationProviderFlags,
-	type StationConfig,
-} from "../../src/StationProvider.js";
+import type { StationConfig } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import {
 	bootStation,
 	buildCtx,

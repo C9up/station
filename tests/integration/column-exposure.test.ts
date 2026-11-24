@@ -9,7 +9,7 @@
 import "reflect-metadata";
 import { BaseEntity, Column, Entity } from "@c9up/atlas";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resetStationProviderFlags } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import { bootStation, buildCtx, buildTableDb } from "../__helpers__/harness.js";
 import { Account } from "../fixtures/Account.js";
 

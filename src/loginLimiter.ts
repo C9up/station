@@ -45,10 +45,22 @@ export interface StationLoginRateLimitConfig {
  * verbatim, a 1 MB body pinned 1 MB in the store for the whole window.
  */
 export function loginKeys(ip: string, identifier: string): string[] {
+	return [`ip:${ip.trim()}`, loginIdentifierKey(identifier)];
+}
+
+/**
+ * The identifier's key alone, as warden's `AuthRateLimiter.identifierKey`
+ * computes it: what a successful sign-in clears, and the only one it clears.
+ * Clearing the address's key too let a client that owns one admin account
+ * reset its per-address limit by signing in between guesses at the others.
+ * A named deviation, stricter than `@adonisjs/limiter`'s `penalize`, which
+ * resets every key on success.
+ */
+export function loginIdentifierKey(identifier: string): string {
 	const digest = createHash("sha256")
 		.update(identifier.trim().toLowerCase())
 		.digest("base64url");
-	return [`ip:${ip.trim()}`, `id:${digest}`];
+	return `id:${digest}`;
 }
 
 const MAX_KEYS = 100_000;

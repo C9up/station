@@ -5,7 +5,7 @@
  */
 import "reflect-metadata";
 import { beforeEach, describe, expect, it } from "vitest";
-import { resetStationProviderFlags } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import {
 	bootStation,
 	buildCtx,

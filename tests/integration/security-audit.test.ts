@@ -7,8 +7,8 @@
 import "reflect-metadata";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { StationConfig } from "../../src/StationProvider.js";
-import { resetStationProviderFlags } from "../../src/StationProvider.js";
 import type { AuditEvent, SecurityAuditEvent } from "../../src/types.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import {
 	bootStation,
 	buildCtx,
@@ -70,7 +70,9 @@ describe("station > security audit events (bug 222)", () => {
 
 	it("records sign-in, throttling and logout", async () => {
 		const { events, find } = await boot({
-			config: { loginRateLimit: { maxAttempts: 1 } },
+			// Two: the sign-in spends one of the address's attempts, and a
+			// success clears only the identifier's.
+			config: { loginRateLimit: { maxAttempts: 2 } },
 		});
 		const ok = buildCtx({
 			...ORIGIN,

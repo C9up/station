@@ -39,18 +39,15 @@ import type {
 	DatabaseConnection,
 	DateColumnConfig,
 } from "@c9up/atlas";
+import { editableColumns, viewColumns, writeOnlyKeys } from "./columns.js";
 import {
-	editableColumns,
-	isFrameworkManaged,
-	viewColumns,
-	writeOnlyKeys,
-} from "./columns.js";
-import {
+	loginIdentifierKey,
 	loginKeys,
 	MemoryLoginLimiter,
 	type StationLoginLimiter,
 	type StationLoginRateLimitConfig,
 } from "./loginLimiter.js";
+import { isPackageMissing } from "./peerResolution.js";
 import { ResourceRegistry } from "./ResourceRegistry.js";
 import { clearStation, getStation, setStation } from "./services/main.js";
 import type {
@@ -67,6 +64,16 @@ import { buildFormViewModel } from "./views/form.js";
 import { buildListViewModel } from "./views/list.js";
 import { buildLoginViewModel } from "./views/login.js";
 import { buildShowViewModel } from "./views/show.js";
+import { warnedOnce } from "./warnedOnce.js";
+import {
+	deriveWritableSchema,
+	isPlainRecord,
+	type RuneModule,
+	type RuneSchema,
+	type RuneValidationError,
+	resourcesNeedValidation,
+	validateWritableBody,
+} from "./writableSchema.js";
 
 /**
  * Duck-typed slice of the host's IoC container — Station MUST stay
@@ -294,71 +301,6 @@ interface AtlasModule {
 	hasSoftDeletes: (entity: unknown) => boolean;
 }
 
-// ── @c9up/rune structural surface (57.7) ───────────────────────────────────
-// Station consumes rune EXACTLY like atlas: a tolerant dynamic
-// `import("@c9up/rune")` (never a static value import — banned by
-// `tests/unit/no-rune-static-import.test.ts`). The runtime object is typed by
-// these LOCAL structural interfaces (like `AtlasModule` / `StationRepository`),
-// so Station couples to rune's *shape*, not its generic types — zero
-// `import ... from "@c9up/rune"`, `import type` included, keeps the schema
-// derivation tsc-safe and fully decoupled.
-
-/** A rune `RuleChain` — only the builders the derivation calls. */
-interface RuneRuleChain {
-	optional(): RuneRuleChain;
-	nullable(): RuneRuleChain;
-	parse(fn: (value: unknown) => unknown): RuneRuleChain;
-}
-
-/** rune's `rules` factory — the constructors Station maps columns to. */
-interface RuneRules {
-	string(): RuneRuleChain;
-	number(): RuneRuleChain;
-	boolean(): RuneRuleChain;
-	/** Type-free chain — a structural (`json`/`jsonb`) column that must accept objects/arrays. */
-	any(): RuneRuleChain;
-}
-
-/** A single rune `ValidationError`. */
-interface RuneValidationError {
-	field: string;
-	rule: string;
-	message: string;
-	index?: number;
-	meta?: Record<string, unknown>;
-}
-
-/** Result of `schema.validateResult()` — synchronous, never throws. */
-type RuneValidationResult =
-	| {
-			valid: true;
-			errors: ReadonlyArray<RuneValidationError>;
-			data: Record<string, unknown>;
-	  }
-	| {
-			valid: false;
-			errors: ReadonlyArray<RuneValidationError>;
-			data?: undefined;
-	  };
-
-/**
- * A built rune schema — only the result-based check is consumed.
- *
- * `validateResult`, NOT `validate`: rune reserves `validate()` for the
- * contract (async, throwing). Reading `.valid` off a Promise gives `undefined`,
- * so keeping the old name would have made every admin write fail closed with an
- * empty error list.
- */
-interface RuneSchema {
-	validateResult(data: unknown): RuneValidationResult;
-}
-
-/** Lazy-imported `@c9up/rune` value surface (mirror `AtlasModule`). */
-interface RuneModule {
-	schema(fields: Record<string, RuneRuleChain>): RuneSchema;
-	rules: RuneRules;
-}
-
 /**
  * Minimal slice of the host's SHARED inker renderer — the `"inker"` container
  * alias `InkerProvider` binds. Station consumes inker EXACTLY the way it
@@ -572,26 +514,6 @@ const DEFAULT_PER_PAGE = 25;
 const MAX_LOGIN_IDENTIFIER_LENGTH = 254;
 const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 
-/** Process-scoped flags so we warn once per process, not once per request. */
-let authWarnEmitted = false;
-let perPageClampWarned = false;
-let seedPermsWarned = false;
-let missingAuditWarned = false;
-let csrfBlockedWarned = false;
-let revokeUnavailableWarned = false;
-let auditCloneWarnEmitted = false;
-
-/** @internal Reset module-level flags between tests. */
-export function resetStationProviderFlags(): void {
-	authWarnEmitted = false;
-	perPageClampWarned = false;
-	seedPermsWarned = false;
-	missingAuditWarned = false;
-	csrfBlockedWarned = false;
-	revokeUnavailableWarned = false;
-	auditCloneWarnEmitted = false;
-}
-
 /**
  * Stable fingerprint for a failed `station::errors/404` render, used to log each
  * distinct failure MODE once per provider instance rather than once per request.
@@ -610,183 +532,6 @@ function notFoundFailFingerprint(cause: unknown): string {
  * unforeseen unbounded error-code space still cannot inflate the log or memory.
  */
 const NOT_FOUND_RENDER_FAIL_CAP = 32;
-
-/**
- * Column `type` strings mapped to a numeric rune rule (mirrors form.ts input
- * inference). `bigint` is deliberately EXCLUDED: coercing it through `Number()`
- * silently loses precision above `Number.MAX_SAFE_INTEGER`, so a bigint column
- * validates as a string (its exact submitted digits reach atlas intact).
- */
-const NUMBER_COLUMN_TYPES: ReadonlySet<string> = new Set(["integer", "number"]);
-
-/**
- * Structural column `type` strings — validated with `rules.any()` so a JSON/XHR
- * client can submit an object/array (a `rules.string()` would reject it, a
- * regression vs. the pre-57.7 pass-through `filterWritableBody`).
- */
-const JSON_COLUMN_TYPES: ReadonlySet<string> = new Set(["json", "jsonb"]);
-
-/**
- * True when at least one resource mounts a write action that maps a request
- * body onto columns (create / edit). `destroy` needs no body validation. This
- * is the AC7 predicate: it decides whether `@c9up/rune` is REQUIRED at boot —
- * exported so `agnostic-peers-missing.test.ts` can pin the decision directly
- * (the dynamic-import-absent path can't be simulated inside vitest, exactly as
- * for atlas — see that file's header).
- */
-export function resourcesNeedValidation(
-	resources: ReadonlyArray<Resource>,
-): boolean {
-	return resources.some(
-		(r) => r.actions.includes("create") || r.actions.includes("edit"),
-	);
-}
-
-/**
- * Derive a `@c9up/rune` validation schema (57.7) from an entity's writable
- * column metadata — the structural replacement for the hand-rolled
- * `filterWritableBody`. The mass-assignment guarantee is now INHERENT:
- * `schema.validateResult()` returns only the keys of the editable columns it
- * was given, so any other body key — an unknown one, a column outside the
- * allow-list, the PK, a timestamp — is dropped automatically.
- *
- * Excluded, exactly as the old guard did: the primary key, framework-managed
- * timestamps (both the Lucid-style `autoManaged` flag AND the `created_at /
- * updated_at / deleted_at` name convention) — plus, new in 57.7, relations and
- * the soft-delete column (`excludedProps`). Metadata is read column-by-column,
- * NEVER `in` on an instance (`@Column() declare` makes `in` always false —
- * mirror `BaseRepository.#hydrate`).
- *
- * Per-column rule mapping tolerates the form-post wire shape, where every
- * value arrives as a string: booleans `.parse(isCheckedValue)`, numbers
- * `.parse` string→Number (NaN falls through to a type error), everything else
- * `rules.string()`. The explicit `.parse` is deliberate even though rune now
- * coerces both itself — a checkbox posts the values IT chooses (`isCheckedValue`
- * is the column's own truthy spelling), which is a wider set than any
- * general-purpose coercion should accept. `.parse`/`.optional`/`.nullable`
- * force rune's TS path, so no native `.node` is touched.
- *
- * Returns the built schema plus the set of boolean columns — the handler
- * default-fills an ABSENT boolean key to `false` before validating (an
- * unchecked checkbox submits nothing; this preserves the old edit-clears-box
- * behaviour). `columns` is the editable allow-list; framework-owned columns
- * are dropped here too, so no caller can make them writable. `updateSchema`
- * differs only for `writeOnly` columns, which an edit may leave out.
- */
-export function deriveWritableSchema(
-	columns: ReadonlyArray<ColumnMetadata>,
-	pkColumn: string,
-	autoManaged: ReadonlySet<string>,
-	excludedProps: ReadonlySet<string>,
-	rune: RuneModule,
-	writeOnly: ReadonlySet<string> = new Set(),
-): {
-	schema: RuneSchema;
-	updateSchema: RuneSchema;
-	booleanKeys: ReadonlySet<string>;
-} {
-	const fields: Record<string, RuneRuleChain> = {};
-	const updateFields: Record<string, RuneRuleChain> = {};
-	const booleanKeys = new Set<string>();
-	for (const c of columns) {
-		if (isFrameworkManaged(c, pkColumn, autoManaged, excludedProps)) continue;
-		const type = (c.type ?? "").toString().toLowerCase();
-		if (type === "boolean") {
-			// Checkbox: the handler pre-fills an absent key to `false`, so every
-			// boolean is always present here → required, no `.optional()`.
-			booleanKeys.add(c.propertyKey);
-			fields[c.propertyKey] = rune.rules.boolean().parse(isCheckedValue);
-			updateFields[c.propertyKey] = rune.rules.boolean().parse(isCheckedValue);
-			continue;
-		}
-		fields[c.propertyKey] = columnChain(c, type, rune, false);
-		updateFields[c.propertyKey] = columnChain(
-			c,
-			type,
-			rune,
-			writeOnly.has(c.propertyKey),
-		);
-	}
-	return {
-		schema: rune.schema(fields),
-		updateSchema: rune.schema(updateFields),
-		booleanKeys,
-	};
-}
-
-/**
- * The rule for one non-boolean column. A column is required iff the model
- * declares neither nullability nor a default — unless `keepable`: an edit may
- * omit a write-only column to keep its stored value. DB-side defaults
- * (serial, `DEFAULT`) are invisible to metadata (documented residual
- * limitation); the PK, the common serial case, is never editable.
- */
-function columnChain(
-	c: ColumnMetadata,
-	type: string,
-	rune: RuneModule,
-	keepable: boolean,
-): RuneRuleChain {
-	const required = !keepable && c.nullable !== true && c.default === undefined;
-	let chain: RuneRuleChain = NUMBER_COLUMN_TYPES.has(type)
-		? rune.rules.number().parse(parseNumeric)
-		: JSON_COLUMN_TYPES.has(type)
-			? rune.rules.any()
-			: rune.rules.string();
-	if (!required) {
-		chain = chain.optional();
-		if (c.nullable === true) chain = chain.nullable();
-	}
-	return chain;
-}
-
-/**
- * Validate a request body against a derived schema (57.7). Default-fills any
- * ABSENT boolean column to `false` first (unchecked checkbox = no submission),
- * preserving the old `filterWritableBody` checkbox semantics, then runs rune's
- * synchronous, never-throwing `validateResult()`. On success `result.data` holds only
- * declared-column keys (mass-assignment inherent). Exported for the unit tests
- * that pin the coercion CRUX. A blank `writeOnly` value counts as not
- * submitted: the form never pre-fills those, so blank means "unchanged".
- */
-export function validateWritableBody(
-	schema: RuneSchema,
-	booleanKeys: ReadonlySet<string>,
-	body: unknown,
-	writeOnly: ReadonlySet<string> = new Set(),
-): RuneValidationResult {
-	// A payload that is not an object (a JSON array, a scalar, null) goes to
-	// rune as it is, so the failure is reported on the root rather than as
-	// per-field errors against an empty object standing in for it.
-	if (!isPlainRecord(body)) return schema.validateResult(body);
-	const input: Record<string, unknown> = { ...body };
-	for (const key of writeOnly) {
-		if (input[key] === "") delete input[key];
-	}
-	for (const key of booleanKeys) {
-		if (!(key in input)) input[key] = false;
-	}
-	return schema.validateResult(input);
-}
-
-/**
- * Form-post number coercion: string→Number, NaN falls through to a type error.
- * `null`/`undefined` pass through untouched so rune's optional/nullable handling
- * applies (never `Number(null) === 0`), and a blank/whitespace-only string —
- * a cleared optional field — becomes `null` (treated as absent) rather than a
- * fabricated `0`.
- */
-function parseNumeric(value: unknown): unknown {
-	if (value === null || value === undefined) return value;
-	if (typeof value === "string") {
-		const trimmed = value.trim();
-		if (trimmed === "") return null;
-		const n = Number(trimmed);
-		return Number.isNaN(n) ? value : n;
-	}
-	const n = Number(value);
-	return Number.isNaN(n) ? value : n;
-}
 
 /**
  * Whether a rune error is about the payload as a whole. rune reports it on the
@@ -975,16 +720,6 @@ function redirectBack(ctx: StationHttpContext, fallback: string): void {
 }
 
 /**
- * A checkbox/boolean field is true only for its checked submissions. Duplicate
- * keys (a hidden `0` companion + the checkbox `1`) arrive as an array — the box
- * is checked if ANY submitted value is a checked token (the checkbox wins).
- */
-function isCheckedValue(value: unknown): boolean {
-	if (Array.isArray(value)) return value.some(isCheckedValue);
-	return value === true || value === "1" || value === "on" || value === "true";
-}
-
-/**
  * Snapshot an entity's `@Column`-tracked fields for the audit before/
  * after diff. Deep-cloned via `structuredClone` so a downstream sink
  * that mutates the snapshot (e.g. "redact this field before logging")
@@ -1021,8 +756,8 @@ function snapshotEntity(
 		} catch {
 			// fall through to the warned shallow copy
 		}
-		if (!auditCloneWarnEmitted) {
-			auditCloneWarnEmitted = true;
+		if (!warnedOnce.auditCloneWarnEmitted) {
+			warnedOnce.auditCloneWarnEmitted = true;
 			const detail = err instanceof Error ? err.message : String(err);
 			console.warn(
 				`[station] structuredClone failed on an audit snapshot and the JSON fallback did not apply — using a shallow copy. A column value isn't cloneable: ${detail}. Snapshot mutations downstream MAY reach the live entity.`,
@@ -1545,8 +1280,8 @@ export default class StationProvider {
 			]);
 		}
 
-		if (authWarnEmitted) return;
-		authWarnEmitted = true;
+		if (warnedOnce.authWarnEmitted) return;
+		warnedOnce.authWarnEmitted = true;
 		// Said even when the deployment opted in: agreeing once in a config file
 		// is not the same as being reminded that this process is running that
 		// way. The line has to be in the logs of the incident.
@@ -1666,12 +1401,12 @@ export default class StationProvider {
 	 * "missing policy entry" warning is gone with the 54.4 callback table.
 	 */
 	#warnSeedPermissionsOnce(resources: ReadonlyArray<Resource>): void {
-		if (seedPermsWarned) return;
+		if (warnedOnce.seedPermsWarned) return;
 		// Only meaningful once the Warden layer is wired — the dev-preview /
 		// no-warden path leaves the gate open, so there's nothing to seed.
 		if (this.#authManager === undefined) return;
 		if (resources.length === 0) return;
-		seedPermsWarned = true;
+		warnedOnce.seedPermsWarned = true;
 		const [example] = resources;
 		if (example === undefined) return;
 		const prefix = this.#authConfig.permissionPrefix;
@@ -1687,7 +1422,7 @@ export default class StationProvider {
 	}
 
 	#warnAuditGapsOnce(resources: ReadonlyArray<Resource>): void {
-		if (missingAuditWarned) return;
+		if (warnedOnce.missingAuditWarned) return;
 		const writeActions: ReadonlyArray<ResourceAction> = [
 			"create",
 			"edit",
@@ -1699,7 +1434,7 @@ export default class StationProvider {
 				r.actions.some((a) => writeActions.includes(a)),
 		);
 		if (missing.length === 0) return;
-		missingAuditWarned = true;
+		warnedOnce.missingAuditWarned = true;
 		console.warn(
 			`[station] No audit sink configured for write-enabled resources: ${missing.map((r) => r.name).join(", ")}. Pass 'audit:' in defineResource() to persist mutations to your audit log.`,
 		);
@@ -1836,8 +1571,8 @@ export default class StationProvider {
 			const page = clampPositiveInt(qs.page, 1);
 			const perPageRaw = clampPositiveInt(qs.perPage, DEFAULT_PER_PAGE);
 			const perPage = Math.min(perPageRaw, MAX_PER_PAGE);
-			if (perPage < perPageRaw && !perPageClampWarned) {
-				perPageClampWarned = true;
+			if (perPage < perPageRaw && !warnedOnce.perPageClampWarned) {
+				warnedOnce.perPageClampWarned = true;
 				console.warn(
 					`[station] perPage clamped to ${MAX_PER_PAGE} (got ${perPageRaw}). Suppressing further warnings.`,
 				);
@@ -2515,7 +2250,7 @@ export default class StationProvider {
 				});
 				return;
 			}
-			await this.#loginLimiter?.clear(...keys);
+			await this.#loginLimiter?.clear(loginIdentifierKey(email));
 			await this.#securityEvent(ctx, {
 				action: "login",
 				userId: result.user?.id,
@@ -2613,8 +2348,8 @@ export default class StationProvider {
 				reason = err instanceof Error ? err.message : String(err);
 			}
 		}
-		if (revokeUnavailableWarned) return;
-		revokeUnavailableWarned = true;
+		if (warnedOnce.revokeUnavailableWarned) return;
+		warnedOnce.revokeUnavailableWarned = true;
 		console.warn(
 			`[station] Logout cannot revoke the admin token (${reason}); it stays valid until it expires. Give warden's JwtStrategy a \`blacklist\` so a logged-out token is refused.`,
 		);
@@ -2915,47 +2650,6 @@ function clampPositiveInt(raw: string | undefined, fallback: number): number {
 	return Number.isFinite(n) && n >= 1 ? n : fallback;
 }
 
-/**
- * Node's ERR_MODULE_NOT_FOUND surfaces on an Error subclass with `code`.
- * Exported for the 54.8 agnostic-peer-missing unit test, which can't
- * realistically simulate the dynamic-import failure path inside vitest's
- * mock graph.
- */
-export function isModuleNotFound(err: unknown): boolean {
-	if (err === null || typeof err !== "object" || !("code" in err)) return false;
-	const { code } = err;
-	return code === "ERR_MODULE_NOT_FOUND" || code === "MODULE_NOT_FOUND";
-}
-
-/**
- * Is THIS package the one that is missing?
- *
- * The code alone does not say. `@c9up/atlas` installed but missing one of its
- * OWN dependencies raises the same `ERR_MODULE_NOT_FOUND`, and station read
- * that as "atlas is absent" and disabled the admin — silently, which is the
- * whole point of the degraded-host path and exactly wrong here: the peer IS
- * there and something inside it is broken, which the operator has to be told.
- *
- * Node distinguishes the two in the message it writes:
- *
- *   Cannot find package '@c9up/atlas' imported from …   ← the peer is absent
- *   Cannot find module '/…/node_modules/@c9up/atlas/…'  ← something inside it
- *
- * A bare-specifier miss names the PACKAGE; a miss inside an installed package
- * names a path. Anything that is not unmistakably the first is re-thrown.
- */
-export function isPackageMissing(err: unknown, specifier: string): boolean {
-	if (!isModuleNotFound(err)) return false;
-	const message = err instanceof Error ? err.message : String(err);
-	// The exact forms Node emits for a bare specifier that resolves to nothing.
-	return (
-		message.includes(`Cannot find package '${specifier}'`) ||
-		message.includes(`Cannot find module '${specifier}'`) ||
-		// The CJS wording, kept for a host that transpiles.
-		message.includes(`Cannot find module "${specifier}"`)
-	);
-}
-
 /** Ream's router proxy throws this exact string before Ignitor wires it. */
 function isRouterProxyUninit(err: unknown): boolean {
 	return (
@@ -3058,8 +2752,8 @@ function deny(ctx: StationHttpContext): void {
  * `/admin/*` excepted).
  */
 function denyCsrf(ctx: StationHttpContext): void {
-	if (!csrfBlockedWarned) {
-		csrfBlockedWarned = true;
+	if (!warnedOnce.csrfBlockedWarned) {
+		warnedOnce.csrfBlockedWarned = true;
 		console.error(
 			"[station] Blocked a write to /admin/* — CSRF was not enforced for this request. Check that @c9up/blackhole is wired (csrf: true) in start/kernel.ts, /admin/* is NOT in csrf.exceptRoutes, and the blackhole native addon has been rebuilt (a stale .node predates the csrfProtected signal and always reads undefined). Returning 403.",
 		);
@@ -3088,10 +2782,6 @@ function denyCsrf(ctx: StationHttpContext): void {
  * would silently no-op.
  */
 const parsedBodyCache = new WeakMap<StationHttpContext, unknown>();
-
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-	return value !== null && typeof value === "object" && !Array.isArray(value);
-}
 
 /**
  * The request payload as the body parser produced it, whatever its shape. The

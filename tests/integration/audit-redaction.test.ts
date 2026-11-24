@@ -6,8 +6,8 @@
  */
 import "reflect-metadata";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { resetStationProviderFlags } from "../../src/StationProvider.js";
 import type { AuditEvent } from "../../src/types.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import { bootStation, buildCtx, buildTableDb } from "../__helpers__/harness.js";
 import { Account } from "../fixtures/Account.js";
 

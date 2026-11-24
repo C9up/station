@@ -16,9 +16,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	resetStationProviderFlags,
 	type StationAppContext,
 } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
@@ -134,7 +134,8 @@ function buildSeededDb(userCount: number) {
 		// `find(pk)` — `SELECT ... WHERE "id" = ? LIMIT 1`. Match on the
 		// WHERE clause specifically because the COUNT branch above also
 		// contained `LIMIT` in some compiler outputs.
-		if (sql.includes('WHERE "id" = ?') || sql.includes("WHERE id = ?")) {
+		// With or without the parentheses atlas puts around a where group.
+		if (/WHERE \(?"?id"? = \?/.test(sql)) {
 			const id = Number(params[0]);
 			const row = users.find((u) => u.id === id);
 			return row ? [row] : [];

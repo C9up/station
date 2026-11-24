@@ -5,12 +5,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	deriveWritableSchema,
-	resetStationProviderFlags,
 	type StationAppContext,
-	validateWritableBody,
 } from "../../src/StationProvider.js";
 import { getStation } from "../../src/services/main.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
+import {
+	deriveWritableSchema,
+	validateWritableBody,
+} from "../../src/writableSchema.js";
 import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
 
@@ -73,6 +75,13 @@ function makeApp(opts?: { router?: unknown }): {
 	};
 	return { app, resolved, bindings };
 }
+
+describe("station > ./provider public surface", () => {
+	it("exports the provider class alone: the test seams live in internal modules", async () => {
+		const mod = await import("../../src/StationProvider.js");
+		expect(Object.keys(mod)).toEqual(["default"]);
+	});
+});
 
 describe("station > StationProvider > lifecycle", () => {
 	beforeEach(() => {

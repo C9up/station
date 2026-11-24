@@ -1,14 +1,15 @@
 /**
  * Brute-force protection on POST /admin/login (bug 213): attempts are counted
  * per IP and per identifier before the credential check, the 6th in a window
- * is refused with 429 + Retry-After, a success clears the counters, and the
+ * is refused with 429 + Retry-After, a success clears the identifier's counter
+ * (never the address's), and the
  * limiter and route middleware are configurable.
  */
 import "reflect-metadata";
 import { createHash } from "node:crypto";
 import { beforeEach, describe, expect, it } from "vitest";
 import type { StationConfig } from "../../src/StationProvider.js";
-import { resetStationProviderFlags } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import {
 	bootStation,
 	buildCtx,
@@ -70,13 +71,32 @@ describe("station > admin login rate limit (bug 213)", () => {
 		).toBe(429);
 	});
 
-	it("a success clears the counters", async () => {
+	it("a success clears the identifier's counter only", async () => {
 		const { attempt } = await boot();
 		for (let i = 0; i < 4; i++) await attempt("admin@example.com", "nope");
 		expect((await attempt("admin@example.com", "hunter2")).status).toBe(302);
+		// The identifier starts afresh: five more failures from other addresses.
 		for (let i = 0; i < 5; i++) {
-			expect((await attempt("admin@example.com", "nope")).status).toBe(401);
+			expect(
+				(await attempt("admin@example.com", "nope", `10.0.2.${i}`)).status,
+			).toBe(401);
 		}
+		// The address that signed in has spent its five attempts all the same.
+		expect((await attempt("other@example.com", "nope")).status).toBe(429);
+	});
+
+	it("an address that owns an account cannot reset its own limit by signing in", async () => {
+		// Spraying other admins' passwords between sign-ins to its own account:
+		// the per-address counter keeps counting through every success.
+		const { auth, attempt } = await boot();
+		const statuses: (number | undefined)[] = [];
+		for (let i = 0; i < 6; i++) {
+			statuses.push((await attempt(`victim${i}@example.com`, "guess")).status);
+			statuses.push((await attempt("admin@example.com", "hunter2")).status);
+		}
+		expect(statuses.slice(0, 5)).toEqual([401, 302, 401, 302, 401]);
+		expect(statuses.slice(5)).toEqual([429, 429, 429, 429, 429, 429, 429]);
+		expect(auth.calls.authenticate).toBe(5);
 	});
 
 	it("uses an injected limiter (warden's AuthRateLimiter shape) with warden's keys", async () => {
@@ -100,7 +120,7 @@ describe("station > admin login rate limit (bug 213)", () => {
 		).toBe(302);
 		const id = `id:${createHash("sha256").update("admin@example.com").digest("base64url")}`;
 		expect(seen[0]).toEqual(["ip:1.2.3.4", id]);
-		expect(cleared).toEqual([["ip:1.2.3.4", id]]);
+		expect(cleared).toEqual([[id]]);
 		const refused = await attempt("admin@example.com", "hunter2", "1.2.3.4");
 		expect(refused.status).toBe(429);
 		expect(refused.headers.get("retry-after")).toBe("42");

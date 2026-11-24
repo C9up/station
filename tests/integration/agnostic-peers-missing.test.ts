@@ -33,15 +33,17 @@
 import "reflect-metadata";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
-import { ResourceRegistry } from "../../src/ResourceRegistry.js";
-import StationProvider, {
+import {
 	isModuleNotFound,
 	isPackageMissing,
-	resetStationProviderFlags,
-	resourcesNeedValidation,
+} from "../../src/peerResolution.js";
+import { ResourceRegistry } from "../../src/ResourceRegistry.js";
+import StationProvider, {
 	type StationAppContext,
 	type StationConfig,
 } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
+import { resourcesNeedValidation } from "../../src/writableSchema.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";

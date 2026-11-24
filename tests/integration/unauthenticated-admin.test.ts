@@ -9,10 +9,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineResource } from "../../src/defineResource.js";
 import { ResourceRegistry } from "../../src/ResourceRegistry.js";
 import StationProvider, {
-	resetStationProviderFlags,
 	type StationAppContext,
 	type StationConfig,
 } from "../../src/StationProvider.js";
+import { resetStationProviderFlags } from "../../src/warnedOnce.js";
 import { bypassTypeCheck } from "../__helpers__/bypass-type-check.js";
 import { makeInkerRenderer } from "../__helpers__/inker-renderer.js";
 import { User } from "../fixtures/User.js";
